@@ -1,0 +1,64 @@
+"""
+URL configuration for ozontelemetry project.
+
+The `urlpatterns` list routes URLs to views. For more information please see:
+    https://docs.djangoproject.com/en/5.2/topics/http/urls/
+Examples:
+Function views
+    1. Add an import:  from my_app import views
+    2. Add a URL to urlpatterns:  path('', views.home, name='home')
+Class-based views
+    1. Add an import:  from other_app.views import Home
+    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
+Including another URLconf
+    1. Import the include() function: from django.urls import include, path
+    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
+"""
+from django.contrib import admin
+from django.urls import path, include
+from django.http import JsonResponse
+from django.contrib.auth import views as auth_views
+from django.contrib.auth import logout
+from django.shortcuts import redirect
+from rest_framework.routers import DefaultRouter
+from telemetry.views import (
+    TelemetryViewSet, TelemetryEventViewSet, DeviceStatusViewSet, OutletViewSet, MachineViewSet,
+    iot_ingest, export_data, flush_all_data, handshake, events, devices_list_page,
+    outlets_page, machines_page, device_bind, device_unbind, devices_data_api
+)
+
+def custom_logout(request):
+    """Custom logout view that just redirects without showing a page"""
+    logout(request)
+    return redirect('/accounts/login/')
+
+router = DefaultRouter()
+router.register(r'telemetry', TelemetryViewSet, basename='telemetry')
+router.register(r'events', TelemetryEventViewSet, basename='events')
+router.register(r'devices', DeviceStatusViewSet, basename='devices')
+router.register(r'outlets', OutletViewSet, basename='outlets')
+router.register(r'machines', MachineViewSet, basename='machines')
+
+urlpatterns = [
+    path('', devices_list_page, name='home'),
+    path('admin/', admin.site.urls),
+    # Auth
+    path('accounts/login/', auth_views.LoginView.as_view(template_name='telemetry/login.html'), name='login'),
+    path('accounts/logout/', custom_logout, name='logout'),
+    # HTML management pages
+    path('outlets/', outlets_page, name='outlets'),
+    path('machines/', machines_page, name='machines'),
+    path('devices/bind/', device_bind, name='device_bind'),
+    path('devices/unbind/', device_unbind, name='device_unbind'),
+    # Real-time data API
+    path('api/devices-data/', devices_data_api, name='devices_data_api'),
+    # New device endpoints (avoid conflict with router '/api/events/')
+    path('api/handshake/', handshake),
+    path('api/device/events/', events),
+    # Router APIs
+    path('api/', include(router.urls)),
+    # Legacy and utilities
+    path('api/iot/', iot_ingest),  # legacy
+    path('api/export/', export_data),
+    path('api/flush/', flush_all_data),
+]

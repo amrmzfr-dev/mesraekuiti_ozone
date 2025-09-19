@@ -1,0 +1,69 @@
+{% extends "telemetry/base.html" %}
+
+{% block title %}Devices · Ozone Telemetry{% endblock %}
+
+{% block content %}
+<h3>Devices</h3>
+
+<section class="cards" style="margin-bottom:1rem">
+  <div class="card">
+    <strong>Overview</strong>
+    <p style="margin:.5rem 0 0">Manage ESP32 devices, see online status, counts and firmware.</p>
+  </div>
+</section>
+
+<table class="striped">
+  <thead>
+    <tr>
+      <th>Status</th>
+      <th>Device ID</th>
+      <th>MAC</th>
+      <th>Assigned</th>
+      <th>Firmware</th>
+      <th>Last Seen</th>
+      <th>Basic</th>
+      <th>Standard</th>
+      <th>Premium</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in devices %}
+    <tr>
+      <td>
+        {% if d.online %}
+          <span class="status-dot dot-online" title="Online"></span>
+        {% else %}
+          <span class="status-dot dot-offline" title="Offline"></span>
+        {% endif %}
+      </td>
+      <td class="mono">{{ d.device_id }}</td>
+      <td class="mono">{{ d.mac }}</td>
+      <td>{{ d.assigned|yesno:"Yes,No" }}</td>
+      <td class="mono">{{ d.firmware|default:"-" }}</td>
+      <td>{{ d.last_seen|date:"Y-m-d H:i:s" }}</td>
+      <td>{{ d.counts.basic|default:"-" }}</td>
+      <td>{{ d.counts.standard|default:"-" }}</td>
+      <td>{{ d.counts.premium|default:"-" }}</td>
+      <td>
+        <details>
+          <summary>Bind</summary>
+          <form method="post" action="/devices/bind/">
+            {% csrf_token %}
+            <input type="hidden" name="device_id" value="{{ d.device_id }}" />
+            <input name="machine_id" placeholder="machine id" />
+            <button type="submit">Bind</button>
+          </form>
+        </details>
+      </td>
+    </tr>
+    {% empty %}
+    <tr>
+      <td colspan="9">No devices found.</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+  </table>
+{% endblock %}
+
+

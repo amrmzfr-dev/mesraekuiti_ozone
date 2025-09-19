@@ -1,0 +1,71 @@
+{% extends "telemetry/base.html" %}
+
+{% block title %}Outlets · Ozone Telemetry{% endblock %}
+
+{% block content %}
+<h3>Outlets</h3>
+
+<section class="cards" style="margin-bottom:1rem">
+  <div class="card">
+    <strong>Add Outlet</strong>
+    <p style="margin:.5rem 0 1rem">Outlets group machines and devices under a location.</p>
+
+<details open>
+  <summary>Add Outlet</summary>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="form" value="add_outlet" />
+    <div class="grid">
+      <div>
+        <label>Name
+          <input name="name" required />
+        </label>
+      </div>
+      <div>
+        <label>Address
+          <input name="address" />
+        </label>
+      </div>
+      <div>
+        <label>Contact
+          <input name="contact" />
+        </label>
+      </div>
+      <div>
+        <label>
+          <input type="checkbox" name="is_active" checked /> Active
+        </label>
+      </div>
+    </div>
+    <button type="submit">Create</button>
+  </form>
+  </div>
+</section>
+
+<table class="striped">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Address</th>
+      <th>Contact</th>
+      <th>Active</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for o in outlets %}
+    <tr>
+      <td>{{ o.name }}</td>
+      <td>{{ o.address|default:"-" }}</td>
+      <td>{{ o.contact|default:"-" }}</td>
+      <td>{{ o.is_active|yesno:"Yes,No" }}</td>
+    </tr>
+    {% empty %}
+    <tr>
+      <td colspan="4">No outlets found.</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+
+

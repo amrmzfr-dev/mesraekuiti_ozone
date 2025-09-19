@@ -1,0 +1,205 @@
+{
+  "info": {
+    "_postman_id": "f3a9c4a0-6d5b-4b55-9c3e-ozonep2-backend",
+    "name": "Ozone P2 Backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "Handshake",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mac\": \"{{mac}}\",\n  \"firmware\": \"{{firmware}}\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/handshake/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "handshake",
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "Send Treatment Event",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"device_id\": \"{{device_id}}\",\n  \"firmware\": \"{{firmware}}\",\n  \"event_id\": \"{{device_id}}-0000000123\",\n  \"event\": \"treatment\",\n  \"treatment\": \"BASIC\",\n  \"counter\": 124,\n  \"ts\": \"2025-09-16T12:34:56Z\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/device/events/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "device",
+            "events",
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "Devices Online",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/devices/online/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "devices",
+            "online",
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "Devices All",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/devices/all/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "devices",
+            "all",
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "Unregistered Devices",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/machines/unregistered/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "machines",
+            "unregistered",
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "Export CSV",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/export/?device_id={{device_id}}&days=30",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "export",
+            ""
+          ],
+          "query": [
+            { "key": "device_id", "value": "{{device_id}}" },
+            { "key": "days", "value": "30" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Flush (Danger)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/flush/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "flush",
+            ""
+          ]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://www.ozone-p2.mesraekuiti.com"
+    },
+    {
+      "key": "mac",
+      "value": "AA:BB:CC:DD:EE:FF"
+    },
+    {
+      "key": "firmware",
+      "value": "1.0.0"
+    },
+    {
+      "key": "device_id",
+      "value": "esp32-001"
+    },
+    {
+      "key": "token",
+      "value": "paste_token_from_handshake"
+    }
+  ]
+}
+
+

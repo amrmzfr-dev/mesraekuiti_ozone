@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Ozone Telemetry{% endblock %}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f8f9fa;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1rem;
+        }
+        
+        header {
+            background: #fff;
+            border-bottom: 1px solid #e9ecef;
+            padding: 1rem 0;
+            margin-bottom: 2rem;
+        }
+        
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #007bff;
+            text-decoration: none;
+        }
+        
+        .nav {
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .nav a {
+            color: #6c757d;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            transition: all 0.2s;
+        }
+        
+        .nav a:hover, .nav a.active {
+            color: #007bff;
+            background-color: #e7f3ff;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .user-info span {
+            color: #6c757d;
+        }
+        
+        .user-info a {
+            color: #dc3545;
+            text-decoration: none;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            transition: background-color 0.2s;
+        }
+        
+        .user-info a:hover {
+            background-color: #f8d7da;
+        }
+        
+        main {
+            background: #fff;
+            border-radius: 0.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        h1, h2, h3, h4, h5, h6 {
+            margin-bottom: 1rem;
+            color: #212529;
+        }
+        
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .card {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+        }
+        
+        .card strong {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #495057;
+        }
+        
+        .card p {
+            margin-bottom: 1rem;
+            color: #6c757d;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            color: #495057;
+        }
+        
+        input, select, textarea {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #ced4da;
+            border-radius: 0.375rem;
+            font-size: 1rem;
+        }
+        
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 0 0.2rem rgba(0,123,255,0.25);
+        }
+        
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background-color 0.2s;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        button.secondary {
+            background: #6c757d;
+        }
+        
+        button.secondary:hover {
+            background: #545b62;
+        }
+        
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        .toolbar {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+        
+        .toolbar form {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+        
+        .toolbar input, .toolbar select {
+            width: auto;
+            min-width: 150px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        
+        .striped tbody tr:nth-child(odd) {
+            background-color: #f8f9fa;
+        }
+        
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+        }
+        
+        .mono {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+        
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+        }
+        
+        .dot-online {
+            background-color: #28a745;
+        }
+        
+        .dot-offline {
+            background-color: #dc3545;
+        }
+        
+        .badge {
+            background-color: #6c757d;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+        }
+        
+        details {
+            margin: 0.5rem 0;
+        }
+        
+        summary {
+            cursor: pointer;
+            padding: 0.5rem;
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 0.375rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        summary:hover {
+            background-color: #e9ecef;
+        }
+        
+        details[open] summary {
+            border-bottom-left-radius: 0;
+            border-bottom-right-radius: 0;
+            border-bottom: none;
+        }
+        
+        details[open] {
+            border: 1px solid #e9ecef;
+            border-radius: 0.375rem;
+            padding: 0.5rem;
+        }
+        
+        .alert {
+            padding: 1rem;
+            border-radius: 0.375rem;
+            margin-bottom: 1rem;
+        }
+        
+        .alert-success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .alert-danger {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .alert-info {
+            background-color: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                gap: 1rem;
+            }
+            
+            .nav {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+            
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .cards {
+                grid-template-columns: 1fr;
+            }
+            
+            .toolbar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .toolbar form {
+                flex-direction: column;
+            }
+            
+            .toolbar input, .toolbar select {
+                width: 100%;
+            }
+        }
+        
+        /* Prevent back button after logout */
+        body {
+            -webkit-backface-visibility: hidden;
+            -webkit-transform: translateZ(0);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="header-content">
+                <a href="{% url 'home' %}" class="logo">Ozone Telemetry</a>
+                
+                <nav class="nav">
+                    <a href="{% url 'home' %}" {% if request.resolver_match.url_name == 'home' %}class="active"{% endif %}>Devices</a>
+                    <a href="{% url 'outlets' %}" {% if request.resolver_match.url_name == 'outlets' %}class="active"{% endif %}>Outlets</a>
+                    <a href="{% url 'machines' %}" {% if request.resolver_match.url_name == 'machines' %}class="active"{% endif %}>Machines</a>
+                </nav>
+                
+                <div class="user-info">
+                    {% if user.is_authenticated %}
+                        <span>Welcome, {{ user.username }}</span>
+                        <a href="{% url 'logout' %}">Logout</a>
+                    {% else %}
+                        <a href="{% url 'login' %}">Login</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </header>
+    
+    <main>
+        <div class="container">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+    
+    <script>
+        // Prevent back button after logout
+        window.addEventListener('pageshow', function(event) {
+            // If the page was loaded from cache (back button), reload it
+            if (event.persisted) {
+                window.location.reload();
+            }
+        });
+        
+        // Additional security: Clear history on logout
+        function clearHistory() {
+            if (window.history && window.history.pushState) {
+                window.history.pushState(null, null, window.location.href);
+                window.onpopstate = function(event) {
+                    window.history.pushState(null, null, window.location.href);
+                };
+            }
+        }
+        
+        // Apply history clearing when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            clearHistory();
+        });
+        
+        // Real-time updates via AJAX (every 5 seconds)
+        function updateDevicesData() {
+            // Only update if user is on devices page and page is visible
+            if (window.location.pathname === '/' && document.visibilityState === 'visible') {
+                fetch('/api/devices-data/', {
+                    method: 'GET',
+                    headers: {
+                        'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]')?.value || '',
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.devices) {
+                        updateDevicesTable(data.devices);
+                    }
+                })
+                .catch(error => {
+                    console.log('Error fetching devices data:', error);
+                });
+            }
+        }
+        
+        // Update devices table with new data
+        function updateDevicesTable(devices) {
+            const tbody = document.querySelector('table tbody');
+            if (!tbody) return;
+            
+            tbody.innerHTML = '';
+            
+            devices.forEach(device => {
+                const row = document.createElement('tr');
+                
+                // Status dot
+                const statusDot = device.online ? 
+                    '<span class="status-dot dot-online" title="Online"></span>' : 
+                    '<span class="status-dot dot-offline" title="Offline"></span>';
+                
+                // Last seen formatting
+                const lastSeen = device.last_seen ? 
+                    new Date(device.last_seen).toLocaleString() : '-';
+                
+                row.innerHTML = `
+                    <td>${statusDot}</td>
+                    <td class="mono">${device.device_id}</td>
+                    <td class="mono">${device.mac}</td>
+                    <td>${device.assigned ? 'Yes' : 'No'}</td>
+                    <td class="mono">${device.firmware || '-'}</td>
+                    <td>${lastSeen}</td>
+                    <td>${device.counts.basic || '-'}</td>
+                    <td>${device.counts.standard || '-'}</td>
+                    <td>${device.counts.premium || '-'}</td>
+                    <td>
+                        <details>
+                            <summary>Bind</summary>
+                            <form method="post" action="/devices/bind/">
+                                <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]')?.value || ''}">
+                                <input type="hidden" name="device_id" value="${device.device_id}" />
+                                <input name="machine_id" placeholder="machine id" />
+                                <button type="submit">Bind</button>
+                            </form>
+                        </details>
+                    </td>
+                `;
+                
+                tbody.appendChild(row);
+            });
+        }
+        
+        // Start real-time updates
+        setInterval(updateDevicesData, 5000); // Update every 5 seconds
+    </script>
+</body>
+</html>

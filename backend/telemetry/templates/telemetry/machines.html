@@ -1,0 +1,96 @@
+{% extends "telemetry/base.html" %}
+
+{% block title %}Machines · Ozone Telemetry{% endblock %}
+
+{% block content %}
+<h3>Machines</h3>
+
+<section class="cards" style="margin-bottom:1rem">
+  <div class="card">
+    <strong>Add Machine</strong>
+    <p style="margin:.5rem 0 1rem">Create a machine under an outlet, then bind a device ID.</p>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="form" value="add_machine" />
+      <div class="grid">
+        <div>
+          <label>Outlet (optional)
+            <select name="outlet_id">
+              <option value="">No outlet</option>
+              {% for o in outlets %}
+                <option value="{{ o.id }}">{{ o.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div>
+          <label>Name
+            <input name="name" required />
+          </label>
+        </div>
+      </div>
+      <button type="submit">Create</button>
+    </form>
+  </div>
+</section>
+
+<h5>Current Machines</h5>
+<table class="striped">
+  <thead>
+    <tr>
+      <th>Outlet</th>
+      <th>Name</th>
+      <th>Bound Device</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in machines %}
+    <tr>
+      <td>{% if m.outlet %}{{ m.outlet.name }}{% else %}<span class="badge">No outlet</span>{% endif %}</td>
+      <td>{{ m.name }}</td>
+      <td class="mono">
+        {% for md in m.machinedevice_set.all %}
+          {% if md.is_active %}{{ md.device_id }}{% endif %}
+        {% endfor %}
+      </td>
+      <td>
+        <div class="toolbar">
+          <form method="post" action="/devices/bind/">
+            {% csrf_token %}
+            <input type="hidden" name="machine_id" value="{{ m.id }}" />
+            <select name="device_id" required>
+              <option value="">Bind device…</option>
+              {% for d in available_devices %}
+                <option value="{{ d.device_id }}">{{ d.device_id }}{% if not d.assigned %} (unassigned){% endif %}</option>
+              {% endfor %}
+            </select>
+            <button type="submit">Bind</button>
+          </form>
+          <form method="post" action="/devices/unbind/">
+            {% csrf_token %}
+            {% with active=None %}
+              {% for md in m.machinedevice_set.all %}
+                {% if md.is_active %}{% with active=md %}{% endwith %}{% endif %}
+              {% endfor %}
+              {% if active %}
+                <input type="hidden" name="device_id" value="{{ active.device_id }}" />
+                <button type="submit" class="secondary">Unbind</button>
+              {% else %}
+                <button type="button" class="secondary" disabled>Unbind</button>
+              {% endif %}
+            {% endwith %}
+          </form>
+        </div>
+      </td>
+    </tr>
+    {% empty %}
+    <tr>
+      <td colspan="4">No machines found.</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+
+
