@@ -1,23 +1,5 @@
 from django.db import models
 
-
-class TelemetryRecord(models.Model):
-    device_id = models.CharField(max_length=128, db_index=True)
-    temperature_c = models.FloatField(null=True, blank=True)
-    humidity_percent = models.FloatField(null=True, blank=True)
-    pressure_hpa = models.FloatField(null=True, blank=True)
-    voltage_v = models.FloatField(null=True, blank=True)
-    rssi_dbm = models.IntegerField(null=True, blank=True)
-    payload = models.JSONField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-
-    def __str__(self) -> str:
-        return f"{self.device_id} @ {self.created_at.isoformat()}"
-
-
 class Device(models.Model):
     """Registered hardware device (ESP32)."""
     mac = models.CharField(max_length=32, unique=True, db_index=True)
@@ -195,7 +177,13 @@ class Machine(models.Model):
 
 
 class MachineDevice(models.Model):
-    """Device (ESP32) assigned to a machine - supports multiple devices per machine over time"""
+    """ESP32 assigned to a machine. Exactly one can be active at a time.
+
+    History is preserved by marking previous bindings inactive with a
+    timestamp in `deactivated_date`. This allows a machine to show all
+    previously connected ESP32 identifiers while enforcing a single
+    active binding currently.
+    """
     machine = models.ForeignKey(Machine, on_delete=models.CASCADE, related_name='devices')
     device_id = models.CharField(max_length=128, db_index=True)
     is_active = models.BooleanField(default=True)

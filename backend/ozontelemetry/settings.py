@@ -65,7 +65,9 @@ ROOT_URLCONF = 'ozontelemetry.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [
+            os.path.join(BASE_DIR, 'testing_ui', 'templates'),  # local testing UI (ignored in git)
+        ],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
