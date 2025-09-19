@@ -81,6 +81,11 @@
               {% endif %}
             {% endwith %}
           </form>
+          <form method="post" action="/machines/delete/" onsubmit="return confirm('Delete this machine? This cannot be undone.');">
+            {% csrf_token %}
+            <input type="hidden" name="machine_id" value="{{ m.id }}" />
+            <button type="submit" class="danger">Delete</button>
+          </form>
         </div>
       </td>
     </tr>

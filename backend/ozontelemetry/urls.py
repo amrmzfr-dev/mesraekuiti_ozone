@@ -24,7 +24,7 @@ from rest_framework.routers import DefaultRouter
 from telemetry.views import (
     TelemetryViewSet, TelemetryEventViewSet, DeviceStatusViewSet, OutletViewSet, MachineViewSet,
     iot_ingest, export_data, flush_all_data, handshake, events, devices_list_page,
-    outlets_page, machines_page, device_bind, device_unbind, devices_data_api
+    outlets_page, machines_page, device_bind, device_unbind, devices_data_api, machine_delete
 )
 
 def custom_logout(request):
@@ -48,6 +48,7 @@ urlpatterns = [
     # HTML management pages
     path('outlets/', outlets_page, name='outlets'),
     path('machines/', machines_page, name='machines'),
+    path('machines/delete/', machine_delete, name='machine_delete'),
     path('devices/bind/', device_bind, name='device_bind'),
     path('devices/unbind/', device_unbind, name='device_unbind'),
     # Real-time data API

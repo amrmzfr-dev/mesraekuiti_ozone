@@ -672,10 +672,15 @@ def outlets_page(request):
     if request.method == 'POST':
         name = (request.POST.get('name') or '').strip()
         address = (request.POST.get('address') or '').strip()
-        contact = (request.POST.get('contact') or '').strip()
-        is_active = request.POST.get('is_active') == 'on'
+        # Support either 'contact_person' (new) or legacy 'contact' field name from template
+        contact_person = (request.POST.get('contact_person') or request.POST.get('contact') or '').strip()
         if name:
-            Outlet.objects.create(name=name, address=address or '', contact=contact or '', is_active=is_active)
+            Outlet.objects.create(
+                name=name,
+                address=address or '',
+                contact_person=contact_person or '',
+                # Owner-maintained metrics left empty on creation
+            )
             return redirect('outlets')
     outlets = Outlet.objects.all().order_by('name')
     return render(request, 'telemetry/outlets.html', { 'outlets': outlets })
@@ -743,4 +748,19 @@ def device_unbind(request):
         device_id = (request.POST.get('device_id') or '').strip()
         if device_id:
             MachineDevice.objects.filter(device_id=device_id, is_active=True).update(is_active=False)
+    return redirect('machines')
+
+
+@login_required(login_url='/accounts/login/')
+def machine_delete(request):
+    """Delete a machine by ID and cascade related bindings."""
+    from .models import Machine
+    if request.method == 'POST':
+        machine_id = request.POST.get('machine_id')
+        if machine_id:
+            try:
+                machine = Machine.objects.get(id=machine_id)
+                machine.delete()
+            except Machine.DoesNotExist:
+                pass
     return redirect('machines')

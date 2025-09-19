@@ -148,6 +148,10 @@ class Outlet(models.Model):
     address = models.TextField(null=True, blank=True)
     contact_person = models.CharField(max_length=100, null=True, blank=True)
     contact_phone = models.CharField(max_length=20, null=True, blank=True)
+    # Additional owner-maintained metrics (optional)
+    total_sva = models.IntegerField(null=True, blank=True, help_text="Total Service Advisors")
+    average_intage_services = models.IntegerField(null=True, blank=True, help_text="Average intage services")
+    number_of_machines = models.IntegerField(null=True, blank=True, help_text="Number of machines at outlet")
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -161,7 +165,7 @@ class Outlet(models.Model):
 
 class Machine(models.Model):
     """Machine registered to an outlet - can have multiple devices over time"""
-    outlet = models.ForeignKey(Outlet, on_delete=models.CASCADE, related_name='machines')
+    outlet = models.ForeignKey(Outlet, on_delete=models.CASCADE, related_name='machines', null=True, blank=True)
     name = models.CharField(max_length=200, null=True, blank=True)
     machine_type = models.CharField(max_length=50, default='Ozone Generator')
     is_active = models.BooleanField(default=True)
@@ -175,7 +179,8 @@ class Machine(models.Model):
         ordering = ["outlet__name", "name"]
     
     def __str__(self) -> str:
-        return f"{self.name or f'Machine-{self.id}'} @ {self.outlet.name}"
+        outlet_name = self.outlet.name if self.outlet else 'No outlet'
+        return f"{self.name or f'Machine-{self.id}'} @ {outlet_name}"
     
     @property
     def current_device(self):
