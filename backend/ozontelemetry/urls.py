@@ -26,7 +26,8 @@ from rest_framework.routers import DefaultRouter
 from telemetry.views import (
     TelemetryViewSet, TelemetryEventViewSet, DeviceStatusViewSet, OutletViewSet, MachineViewSet,
     iot_ingest, export_data, flush_all_data, handshake, events, devices_list_page,
-    outlets_page, machines_page, device_bind, device_unbind, devices_data_api, machine_delete
+    outlets_page, machines_page, device_bind, device_unbind, devices_data_api, machine_delete,
+    test_devices_page, test_outlets_page, test_machines_page, test_stats_api, test_stats_page, test_stats_options, test_stats_export_csv
 )
 
 def custom_logout(request):
@@ -53,6 +54,14 @@ urlpatterns = [
     path('machines/delete/', machine_delete, name='machine_delete'),
     path('devices/bind/', device_bind, name='device_bind'),
     path('devices/unbind/', device_unbind, name='device_unbind'),
+    # Testing UI routes (duplicate interfaces)
+    path('test/devices/', test_devices_page, name='test_devices'),
+    path('test/outlets/', test_outlets_page, name='test_outlets'),
+    path('test/machines/', test_machines_page, name='test_machines'),
+    path('test/stats/', test_stats_page, name='test_stats_page'),
+    path('api/test/stats/', test_stats_api, name='test_stats_api'),
+    path('api/test/stats-options/', test_stats_options, name='test_stats_options'),
+    path('api/test/stats-export.csv', test_stats_export_csv, name='test_stats_export'),
     # Real-time data API
     path('api/devices-data/', devices_data_api, name='devices_data_api'),
     # New device endpoints (avoid conflict with router '/api/events/')

@@ -1,21 +1,5 @@
 from rest_framework import serializers
-from .models import TelemetryRecord, TelemetryEvent, DeviceStatus, UsageStatistics, Outlet, Machine, MachineDevice
-
-
-class TelemetryRecordSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = TelemetryRecord
-        fields = [
-            "id",
-            "device_id",
-            "temperature_c",
-            "humidity_percent",
-            "pressure_hpa",
-            "voltage_v",
-            "rssi_dbm",
-            "payload",
-            "created_at",
-        ]
+from .models import TelemetryEvent, DeviceStatus, UsageStatistics, Outlet, Machine, MachineDevice
 
 
 class TelemetryEventSerializer(serializers.ModelSerializer):

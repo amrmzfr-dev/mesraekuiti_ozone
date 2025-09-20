@@ -3,22 +3,23 @@ from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes
 from django.utils import timezone
 from django.db.models import Sum, Count, Q, Min, Max
-from django.db.models.functions import TruncDate
+from django.db.models.functions import TruncDate, TruncHour, TruncMinute, TruncMonth
 from datetime import datetime, timedelta
-from .models import TelemetryRecord, TelemetryEvent, DeviceStatus, UsageStatistics, Outlet, Machine, MachineDevice, Device
-from .serializers import TelemetryRecordSerializer, TelemetryEventSerializer, DeviceStatusSerializer, UsageStatisticsSerializer, OutletSerializer, MachineSerializer
+from .models import TelemetryEvent, DeviceStatus, UsageStatistics, Outlet, Machine, MachineDevice, Device
+from .serializers import TelemetryEventSerializer, DeviceStatusSerializer, UsageStatisticsSerializer, OutletSerializer, MachineSerializer
 from django.db import transaction
 import secrets
 from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
+from django.views.decorators.http import require_GET
+from django.utils.dateparse import parse_date
 
 
-class TelemetryViewSet(mixins.CreateModelMixin,
-                       mixins.ListModelMixin,
+class TelemetryViewSet(mixins.ListModelMixin,
                        mixins.RetrieveModelMixin,
                        viewsets.GenericViewSet):
-    queryset = TelemetryRecord.objects.all()
-    serializer_class = TelemetryRecordSerializer
+    queryset = DeviceStatus.objects.all().order_by('-last_seen')
+    serializer_class = DeviceStatusSerializer
     permission_classes = [permissions.AllowAny]
 
     @action(detail=False, methods=["get"], url_path="latest")
@@ -27,10 +28,10 @@ class TelemetryViewSet(mixins.CreateModelMixin,
         qs = self.get_queryset()
         if device_id:
             qs = qs.filter(device_id=device_id)
-        record = qs.first()
-        if not record:
+        status_obj = qs.first()
+        if not status_obj:
             return Response({}, status=200)
-        return Response(self.get_serializer(record).data)
+        return Response(self.get_serializer(status_obj).data)
 
     @action(detail=False, methods=["get"], url_path="summary")
     def summary(self, request):
@@ -38,7 +39,7 @@ class TelemetryViewSet(mixins.CreateModelMixin,
         qs = self.get_queryset()
         if device_id:
             qs = qs.filter(device_id=device_id)
-        record = qs.first()
+        record = TelemetryEvent.objects.filter(device_id=device_id).order_by('-occurred_at').first()
         if not record:
             return Response({"device_id": device_id, "latest": None}, status=200)
         # Extract ESP32-style fields if present
@@ -56,7 +57,7 @@ class TelemetryViewSet(mixins.CreateModelMixin,
                 "standard": payload.get("type2"),
                 "premium": payload.get("type3"),
             },
-            "created_at": record.created_at,
+            "created_at": record.occurred_at,
         }
         return Response(data)
 
@@ -64,7 +65,7 @@ class TelemetryViewSet(mixins.CreateModelMixin,
 @api_view(["POST"]) 
 @permission_classes([permissions.AllowAny])
 def iot_ingest(request):
-    """Accept ESP32 form-urlencoded payload and store as TelemetryRecord.
+    """Accept ESP32 form-urlencoded payload and update DeviceStatus and events only.
 
     Expected fields:
       - mode: "status" or one of BASIC|STANDARD|PREMIUM
@@ -113,7 +114,6 @@ def iot_ingest(request):
     
     if not created:
         device_status.wifi_connected = True
-        # Only update flags if provided in this request. This avoids event posts clearing flags.
         if rtc_available is not None:
             device_status.rtc_available = rtc_available
         if sd_available is not None:
@@ -123,21 +123,6 @@ def iot_ingest(request):
         device_status.current_count_premium = _safe_number(count3) or 0
         device_status.device_timestamp = device_timestamp
         device_status.save()
-
-    # Create telemetry record
-    record = TelemetryRecord.objects.create(
-        device_id=str(macaddr),
-        payload={
-            "mode": mode,
-            "type1": _safe_number(type1),
-            "type2": _safe_number(type2),
-            "type3": _safe_number(type3),
-            "count1": _safe_number(count1),
-            "count2": _safe_number(count2),
-            "count3": _safe_number(count3),
-            "timestamp": device_timestamp,
-        },
-    )
 
     # Determine event type (status = heartbeat)
     event_type = mode if mode in {"BASIC", "STANDARD", "PREMIUM", "status"} else "status"
@@ -160,10 +145,9 @@ def iot_ingest(request):
             },
         )
 
-        # Update daily statistics only for real events
         _update_daily_statistics(str(macaddr), event_type, occurred_at)
 
-    return Response({"status": "ok", "id": record.id})
+    return Response({"status": "ok"})
 
 
 def _parse_device_timestamp(value):
@@ -386,12 +370,11 @@ def export_data(request):
 def flush_all_data(request):
     """Dangerous: wipe all telemetry tables. Intended for admin/testing via UI button.
 
-    Deletes TelemetryEvent, TelemetryRecord, UsageStatistics, and DeviceStatus.
+    Deletes TelemetryEvent, UsageStatistics, and DeviceStatus.
     """
     try:
         with transaction.atomic():
             TelemetryEvent.objects.all().delete()
-            TelemetryRecord.objects.all().delete()
             UsageStatistics.objects.all().delete()
             DeviceStatus.objects.all().delete()
         return Response({"status": "flushed"})
@@ -638,6 +621,284 @@ def devices_list_page(request):
     return render(request, 'telemetry/devices_list.html', { 'devices': context_devices })
 
 
+# ---------------- Testing UI (HTML under /test/*) ----------------
+@login_required(login_url='/accounts/login/')
+@require_GET
+def test_devices_page(request):
+    return devices_list_page(request)
+
+
+@login_required(login_url='/accounts/login/')
+@require_GET
+def test_outlets_page(request):
+    return outlets_page(request)
+
+
+@login_required(login_url='/accounts/login/')
+@require_GET
+def test_machines_page(request):
+    return machines_page(request)
+
+
+@api_view(["GET"]) 
+@permission_classes([permissions.IsAuthenticated])
+def test_stats_api(request):
+    """Aggregated usage stats for charts with filters and granularities.
+
+    Query params:
+      - outlet_id (optional)
+      - machine_id (optional)
+      - device_id (optional)
+      - granularity: minute|hour|day (default day)
+      - start, end: ISO date/time; fallback to 'days'
+      - days: int (default 7)
+    """
+    outlet_id = request.query_params.get('outlet_id')
+    machine_id = request.query_params.get('machine_id')
+    device_id = request.query_params.get('device_id')
+    # Support day and month granularities (default day)
+    granularity = (request.query_params.get('granularity') or 'day').lower()
+    cumulative = (request.query_params.get('cumulative') or 'false').lower() == 'true'
+    ma_window = int(request.query_params.get('ma', 0))  # moving average window in buckets; 0=off
+    days = int(request.query_params.get('days', 7))
+    start_param = request.query_params.get('start')
+    end_param = request.query_params.get('end')
+
+    # Parse start/end in local timezone (Asia/Kuala_Lumpur) and snap to day bounds
+    def _parse_local(dt_str):
+        from django.utils.dateparse import parse_datetime
+        dt = parse_datetime(dt_str)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = timezone.make_aware(dt, timezone.get_current_timezone())
+        return dt
+
+    end_dt = timezone.now()
+    if end_param:
+        parsed_end = _parse_local(end_param)
+        if parsed_end:
+            end_dt = parsed_end
+    start_dt = end_dt - timedelta(days=days-1)
+    if start_param:
+        parsed_start = _parse_local(start_param)
+        if parsed_start:
+            start_dt = parsed_start
+
+    # Snap to local day boundaries for day granularity
+    start_dt = start_dt.astimezone(timezone.get_current_timezone()).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_dt = end_dt.astimezone(timezone.get_current_timezone()).replace(hour=23, minute=59, second=59, microsecond=999000)
+
+    # Determine device set based on filters
+    device_ids = None
+    if device_id:
+        device_ids = [device_id]
+    elif machine_id:
+        device_ids = list(MachineDevice.objects.filter(machine_id=machine_id).values_list('device_id', flat=True).distinct())
+    elif outlet_id:
+        machine_ids = list(Machine.objects.filter(outlet_id=outlet_id).values_list('id', flat=True))
+        device_ids = list(MachineDevice.objects.filter(machine_id__in=machine_ids).values_list('device_id', flat=True).distinct())
+
+    # Build base queryset of events (exclude heartbeat/status)
+    ev_qs = TelemetryEvent.objects.exclude(event_type='status').filter(
+        occurred_at__gte=start_dt,
+        occurred_at__lte=end_dt,
+    )
+    if device_ids is not None:
+        ev_qs = ev_qs.filter(device_id__in=device_ids)
+
+    # Choose truncation function
+    if granularity == 'minute':
+        trunc = TruncMinute('occurred_at')
+        step = timedelta(minutes=1)
+        label_fmt = '%Y-%m-%d %H:%M'
+    elif granularity == 'hour':
+        trunc = TruncHour('occurred_at')
+        step = timedelta(hours=1)
+        label_fmt = '%Y-%m-%d %H:00'
+    elif granularity == 'month':
+        trunc = TruncMonth('occurred_at')
+        step = None  # handled below
+        label_fmt = '%Y-%m'
+    else:
+        trunc = TruncDate('occurred_at')
+        step = timedelta(days=1)
+        label_fmt = '%Y-%m-%d'
+
+    grouped = ev_qs.annotate(bucket=trunc).values('bucket').annotate(
+        total=Count('id'),
+        basic=Count('id', filter=Q(event_type='BASIC')),
+        standard=Count('id', filter=Q(event_type='STANDARD')),
+        premium=Count('id', filter=Q(event_type='PREMIUM')),
+    ).order_by('bucket')
+
+    # Build labels axis
+    labels = []
+    end_inclusive = end_dt
+    if granularity == 'month':
+        # Snap to first day of month
+        cur = start_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        def add_month(d):
+            y, m = d.year, d.month
+            if m == 12:
+                return d.replace(year=y+1, month=1)
+            return d.replace(month=m+1)
+        while cur <= end_inclusive:
+            labels.append(cur.strftime(label_fmt))
+            cur = add_month(cur)
+    else:
+        cur = start_dt
+        while cur <= end_inclusive:
+            labels.append(cur.strftime(label_fmt))
+            cur += step
+
+    # Map results
+    result_map = {g['bucket'].strftime(label_fmt): g for g in grouped}
+    series = {
+        'basic': [],
+        'standard': [],
+        'premium': [],
+        'total': [],
+    }
+    for label in labels:
+        row = result_map.get(label)
+        series['basic'].append((row or {}).get('basic', 0))
+        series['standard'].append((row or {}).get('standard', 0))
+        series['premium'].append((row or {}).get('premium', 0))
+        series['total'].append((row or {}).get('total', 0))
+
+    def _cumulative(arr):
+        s = 0
+        out = []
+        for v in arr:
+            s += int(v or 0)
+            out.append(s)
+        return out
+    def _moving_average(arr, w):
+        if w <= 1:
+            return arr
+        out = []
+        from collections import deque
+        q = deque()
+        s = 0
+        for v in arr:
+            q.append(int(v or 0))
+            s += int(v or 0)
+            if len(q) > w:
+                s -= q.popleft()
+            out.append(round(s / len(q), 2))
+        return out
+
+    # Apply cumulative or moving average if requested
+    if cumulative:
+        for k in list(series.keys()):
+            series[k] = _cumulative(series[k])
+    if ma_window and ma_window > 1:
+        for k in list(series.keys()):
+            series[k] = _moving_average(series[k], ma_window)
+
+    # Optional previous period comparison
+    compare = (request.query_params.get('compare') or 'false').lower() == 'true'
+    prev_series = None
+    if compare:
+        period_delta = end_dt - start_dt
+        prev_end = start_dt - timedelta(seconds=1)
+        prev_start = prev_end - period_delta
+
+        prev_qs = TelemetryEvent.objects.exclude(event_type='status').filter(
+            occurred_at__gte=prev_start,
+            occurred_at__lte=prev_end,
+        )
+        if device_ids is not None:
+            prev_qs = prev_qs.filter(device_id__in=device_ids)
+
+        grouped_prev = prev_qs.annotate(bucket=trunc).values('bucket').annotate(
+            total=Count('id'),
+            basic=Count('id', filter=Q(event_type='BASIC')),
+            standard=Count('id', filter=Q(event_type='STANDARD')),
+            premium=Count('id', filter=Q(event_type='PREMIUM')),
+        ).order_by('bucket')
+
+        # Build prev labels axis to match length
+        prev_labels = []
+        cur_p = prev_start
+        while len(prev_labels) < len(labels):
+            prev_labels.append(cur_p.strftime(label_fmt))
+            cur_p += step
+        prev_map = {g['bucket'].strftime(label_fmt): g for g in grouped_prev}
+        prev_series = {
+            'basic': [],
+            'standard': [],
+            'premium': [],
+            'total': [],
+        }
+        for lab in prev_labels:
+            row = prev_map.get(lab)
+            prev_series['basic'].append((row or {}).get('basic', 0))
+            prev_series['standard'].append((row or {}).get('standard', 0))
+            prev_series['premium'].append((row or {}).get('premium', 0))
+            prev_series['total'].append((row or {}).get('total', 0))
+
+    # KPIs
+    import statistics
+    kpi = {
+        'total': sum(series['total']) if series['total'] else 0,
+        'avg': round(statistics.mean(series['total']), 2) if series['total'] else 0,
+        'min': min(series['total']) if series['total'] else 0,
+        'max': max(series['total']) if series['total'] else 0,
+        'prev_total': sum(prev_series['total']) if prev_series else None,
+        'delta_pct': (round(((sum(series['total']) - sum(prev_series['total'])) / max(1, sum(prev_series['total'])))*100, 2) if prev_series and sum(prev_series['total']) else None)
+    }
+
+    return Response({'labels': labels, 'series': series, 'prev_series': prev_series, 'kpi': kpi})
+
+
+@api_view(["GET"]) 
+@permission_classes([permissions.IsAuthenticated])
+def test_stats_export_csv(request):
+    """Export the current filtered stats as CSV (labels + series)."""
+    # Reuse the logic by calling test_stats_api with the underlying HttpRequest
+    response = test_stats_api(request._request)
+    data = response.data
+    import csv
+    from django.http import HttpResponse
+    http = HttpResponse(content_type='text/csv')
+    http['Content-Disposition'] = 'attachment; filename="stats_export.csv"'
+    writer = csv.writer(http)
+    writer.writerow(['label','basic','standard','premium','total'])
+    for i, lbl in enumerate(data.get('labels', [])):
+        writer.writerow([
+            lbl,
+            data['series']['basic'][i],
+            data['series']['standard'][i],
+            data['series']['premium'][i],
+            data['series']['total'][i],
+        ])
+    return http
+
+
+@api_view(["GET"]) 
+@permission_classes([permissions.IsAuthenticated])
+def test_stats_options(request):
+    """Return lists for filters: outlets, machines (by outlet), devices (by machine)."""
+    outlet_id = request.query_params.get('outlet_id')
+    machine_id = request.query_params.get('machine_id')
+
+    data = {}
+    data['outlets'] = list(Outlet.objects.all().order_by('name').values('id', 'name'))
+    if outlet_id:
+        data['machines'] = list(Machine.objects.filter(outlet_id=outlet_id).order_by('name').values('id', 'name'))
+    if machine_id:
+        data['devices'] = list(MachineDevice.objects.filter(machine_id=machine_id).order_by('-is_active', '-assigned_date').values('device_id', 'is_active'))
+    return Response(data)
+
+
+@login_required(login_url='/accounts/login/')
+@require_GET
+def test_stats_page(request):
+    return render(request, 'testing/stats.html', {})
+
+
 @api_view(["GET"])
 @permission_classes([permissions.IsAuthenticated])
 def devices_data_api(request):
@@ -733,8 +994,12 @@ def device_bind(request):
         if device_id and machine_id:
             try:
                 machine = Machine.objects.get(id=machine_id)
-                # Deactivate existing active binding for this device
-                MachineDevice.objects.filter(device_id=device_id, is_active=True).update(is_active=False)
+                # Deactivate any existing active binding for this machine
+                from django.utils import timezone as _tz
+                MachineDevice.objects.filter(machine=machine, is_active=True).update(is_active=False, deactivated_date=_tz.now())
+                # Deactivate existing active binding for this device on any machine
+                MachineDevice.objects.filter(device_id=device_id, is_active=True).update(is_active=False, deactivated_date=_tz.now())
+                # Create new active binding
                 MachineDevice.objects.create(machine=machine, device_id=device_id, is_active=True)
             except Machine.DoesNotExist:
                 pass
