@@ -6,48 +6,44 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Ozone Telemetry{% endblock %}</title>
     <link rel="stylesheet" href="{% static 'css/global.css' %}">
-
 </head>
 <body>
+    <!-- Top Navbar -->
     <header>
-        <div class="container">
-            <div class="header-content">
-                <a href="{% url 'home' %}" class="logo">Ozone Telemetry</a>
-                
-                <nav class="nav">
-                    <a href="{% url 'home' %}" {% if request.resolver_match.url_name == 'home' %}class="active"{% endif %}>Devices</a>
-                    <a href="{% url 'outlets' %}" {% if request.resolver_match.url_name == 'outlets' %}class="active"{% endif %}>Outlets</a>
-                    <a href="{% url 'machines' %}" {% if request.resolver_match.url_name == 'machines' %}class="active"{% endif %}>Machines</a>
-                </nav>
-                
-                <div class="user-info">
-                    {% if user.is_authenticated %}
-                        <span>Welcome, {{ user.username }}</span>
-                        <a href="{% url 'logout' %}">Logout</a>
-                    {% else %}
-                        <a href="{% url 'login' %}">Login</a>
-                    {% endif %}
-                </div>
-            </div>
+        <button id="sidebarToggle" class="toggle-btn">☰</button>
+        <a href="{% url 'home' %}" class="logo">Ozone Telemetry</a>
+        <div class="user-info">
+            {% if user.is_authenticated %}
+                <span>Welcome, {{ user.username }}</span>
+                <a href="{% url 'logout' %}">Logout</a>
+            {% else %}
+                <a href="{% url 'login' %}">Login</a>
+            {% endif %}
         </div>
     </header>
-    
-    <main>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+        <a href="{% url 'home' %}" {% if request.resolver_match.url_name == 'home' %}class="active"{% endif %}>Devices</a>
+        <a href="{% url 'outlets' %}" {% if request.resolver_match.url_name == 'outlets' %}class="active"{% endif %}>Outlets</a>
+        <a href="{% url 'machines' %}" {% if request.resolver_match.url_name == 'machines' %}class="active"{% endif %}>Machines</a>
+    </aside>
+
+    <!-- Page Content -->
+    <main id="main-content">
         <div class="container">
             {% block content %}{% endblock %}
         </div>
     </main>
-    
+
     <script>
         // Prevent back button after logout
         window.addEventListener('pageshow', function(event) {
-            // If the page was loaded from cache (back button), reload it
             if (event.persisted) {
                 window.location.reload();
             }
         });
-        
-        // Additional security: Clear history on logout
+
         function clearHistory() {
             if (window.history && window.history.pushState) {
                 window.history.pushState(null, null, window.location.href);
@@ -56,15 +52,12 @@
                 };
             }
         }
-        
-        // Apply history clearing when page loads
         document.addEventListener('DOMContentLoaded', function() {
             clearHistory();
         });
-        
+
         // Real-time updates via AJAX (every 5 seconds)
         function updateDevicesData() {
-            // Only update if user is on devices page and page is visible
             if (window.location.pathname === '/' && document.visibilityState === 'visible') {
                 fetch('/api/devices-data/', {
                     method: 'GET',
@@ -85,26 +78,23 @@
                 });
             }
         }
-        
-        // Update devices table with new data
+
         function updateDevicesTable(devices) {
             const tbody = document.querySelector('table tbody');
             if (!tbody) return;
-            
+
             tbody.innerHTML = '';
-            
+
             devices.forEach(device => {
                 const row = document.createElement('tr');
-                
-                // Status dot
+
                 const statusDot = device.online ? 
                     '<span class="status-dot dot-online" title="Online"></span>' : 
                     '<span class="status-dot dot-offline" title="Offline"></span>';
-                
-                // Last seen formatting
+
                 const lastSeen = device.last_seen ? 
                     new Date(device.last_seen).toLocaleString() : '-';
-                
+
                 row.innerHTML = `
                     <td>${statusDot}</td>
                     <td class="mono">${device.device_id}</td>
@@ -127,13 +117,19 @@
                         </details>
                     </td>
                 `;
-                
                 tbody.appendChild(row);
             });
         }
-        
-        // Start real-time updates
-        setInterval(updateDevicesData, 5000); // Update every 5 seconds
+
+        setInterval(updateDevicesData, 5000);
+
+        // Sidebar toggle
+        const toggleBtn = document.getElementById("sidebarToggle");
+        const sidebar = document.getElementById("sidebar");
+
+        toggleBtn.addEventListener("click", () => {
+            sidebar.classList.toggle("open");
+        });
     </script>
 </body>
 </html>
