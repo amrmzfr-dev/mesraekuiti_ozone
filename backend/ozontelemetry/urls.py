@@ -17,23 +17,17 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
-from django.contrib.auth import views as auth_views
-from django.contrib.auth import logout
-from django.shortcuts import redirect
-from django.conf import settings
-from django.conf.urls.static import static
 from rest_framework.routers import DefaultRouter
-from telemetry.views import (
+from rest_framework.response import Response
+from telemetry.views.viewsets import (
     TelemetryViewSet, TelemetryEventViewSet, DeviceStatusViewSet, OutletViewSet, MachineViewSet,
-    iot_ingest, export_data, flush_all_data, handshake, events, devices_list_page,
-    outlets_page, machines_page, device_bind, device_unbind, devices_data_api, machine_delete,
-    test_devices_page, test_outlets_page, test_machines_page, test_stats_api, test_stats_page, test_stats_options, test_stats_export_csv
+)
+from telemetry.api.ingest import iot_ingest, export_data, flush_all_data, handshake, events, devices_data_api, devices_online_api, machines_unregistered_api, flush_all_but_admin
+from telemetry.api.stats import test_stats_api, test_stats_options, test_stats_export_csv
+from telemetry.auth_views import (
+    api_login, api_logout, api_user_info, api_register, api_check_auth, api_csrf
 )
 
-def custom_logout(request):
-    """Custom logout view that just redirects without showing a page"""
-    logout(request)
-    return redirect('/accounts/login/')
 
 router = DefaultRouter()
 router.register(r'telemetry', TelemetryViewSet, basename='telemetry')
@@ -43,35 +37,55 @@ router.register(r'outlets', OutletViewSet, basename='outlets')
 router.register(r'machines', MachineViewSet, basename='machines')
 
 urlpatterns = [
-    path('', devices_list_page, name='home'),
+    # Admin interface (keep for backend management)
     path('admin/', admin.site.urls),
-    # Auth
-    path('accounts/login/', auth_views.LoginView.as_view(template_name='telemetry/login.html'), name='login'),
-    path('accounts/logout/', custom_logout, name='logout'),
-    # HTML management pages
-    path('outlets/', outlets_page, name='outlets'),
-    path('machines/', machines_page, name='machines'),
-    path('machines/delete/', machine_delete, name='machine_delete'),
-    path('devices/bind/', device_bind, name='device_bind'),
-    path('devices/unbind/', device_unbind, name='device_unbind'),
-    # Testing UI routes (duplicate interfaces)
-    path('test/devices/', test_devices_page, name='test_devices'),
-    path('test/outlets/', test_outlets_page, name='test_outlets'),
-    path('test/machines/', test_machines_page, name='test_machines'),
-    path('test/stats/', test_stats_page, name='test_stats_page'),
+    
+    # API Authentication endpoints
+    path('api/auth/login/', api_login, name='api_login'),
+    path('api/auth/logout/', api_logout, name='api_logout'),
+    path('api/auth/register/', api_register, name='api_register'),
+    path('api/auth/user/', api_user_info, name='api_user_info'),
+    path('api/auth/check/', api_check_auth, name='api_check_auth'),
+    path('api/csrf/', api_csrf, name='api_csrf'),
+    
+    # Analytics and statistics APIs (pure API, no HTML pages)
     path('api/test/stats/', test_stats_api, name='test_stats_api'),
     path('api/test/stats-options/', test_stats_options, name='test_stats_options'),
     path('api/test/stats-export.csv', test_stats_export_csv, name='test_stats_export'),
+    
     # Real-time data API
     path('api/devices-data/', devices_data_api, name='devices_data_api'),
-    # New device endpoints (avoid conflict with router '/api/events/')
+    path('api/devices/online/', devices_online_api, name='devices_online_api'),
+    path('api/machines/unregistered/', machines_unregistered_api, name='machines_unregistered_api'),
+    
+    # Device endpoints
     path('api/handshake/', handshake),
     path('api/device/events/', events),
-    # Router APIs
+    
+    # Router APIs (CRUD operations)
     path('api/', include(router.urls)),
+    
     # Legacy and utilities
     path('api/iot/', iot_ingest),  # legacy
     path('api/export/', export_data),
     path('api/flush/', flush_all_data),
+    path('api/flush-except-admin/', flush_all_but_admin),
+    
+    # Root health/info endpoint
+    path('', lambda request: JsonResponse({'message': 'Ozone Telemetry API Backend', 'admin': '/admin/'})),
 ]
+
+# Force JSON errors instead of HTML
+def _json_error_response(message, status_code):
+    return JsonResponse({'detail': message}, status=status_code)
+
+def json_404(request, exception):
+    return _json_error_response('Not found', 404)
+
+def json_500(request):
+    return _json_error_response('Server error', 500)
+
+# Register handlers
+handler404 = 'ozontelemetry.urls.json_404'
+handler500 = 'ozontelemetry.urls.json_500'
 

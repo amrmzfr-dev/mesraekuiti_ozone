@@ -1,61 +1,61 @@
-# Frontend (React + Vite + TypeScript)
+===============================================================================================================================================================
+================================================================ FRONTEND (REACT) ============================================================================
+===============================================================================================================================================================
 
-This frontend provides dashboards and admin tools to visualize and test data flowing from ESP32 → Backend → Frontend.
+Dashboards and admin tools to monitor the Ozone Telemetry system, powered by React and a Django backend.
 
-## Prerequisites
+===============================================================================================================================================================
+==================================================================== PREREQUISITES ============================================================================
+===============================================================================================================================================================
 - Node 18+
-- Backend running locally (Django), default at http://localhost:8000/api
+- Django backend running locally at http://localhost:8000
 
-## Setup
+===============================================================================================================================================================
+======================================================================== SETUP ================================================================================
+===============================================================================================================================================================
 ```
 cd frontend
 npm install
 ```
 
-Create `.env` (or `.env.local`) in `frontend/`:
+===============================================================================================================================================================
+==================================================================== RUN (DEVELOPMENT) ========================================================================
+===============================================================================================================================================================
 ```
-VITE_API_BASE=http://localhost:8000/api
+npm start
 ```
+Open http://localhost:3000. A dev proxy in `frontend/package.json` forwards `/api/*` to the Django backend.
 
-## Run
-```
-npm run dev
-```
-Open the URL shown by Vite (e.g. http://localhost:5173)
+Authentication uses Django sessions (cookies). Log in with your Django user.
 
-Login: `admin` / `admin` (local-only dummy)
+===============================================================================================================================================================
+================================================================== PROJECT STRUCTURE =========================================================================
+===============================================================================================================================================================
+- `frontend/src/components/layout/` — `Layout.jsx`, `Sidebar.jsx`
+- `frontend/src/components/Loader.jsx` — loading spinner
+- `frontend/src/pages/` — `Dashboard.jsx`, `OutletsPage.jsx`, `MachinesPage.jsx`, `DevicesPage.jsx`
+- `frontend/src/services/api.js` — API client (relative URLs; includes credentials)
+- `frontend/src/components/Auth.js` — session check, login, logout, simple path-based routing
+- `frontend/src/App.js` — mounts `Auth`
 
-## Pages
-- Dashboard: system overview; devices, outlets, charts, recent events
-- Outlets: list of outlets (uses GET /api/outlets/)
-- Machines: list of machines (uses GET /api/machines/)
-- Charts: detailed charts (uses GET /api/events/analytics/)
-- Handshake: test device handshake; calls POST `/api/handshake/`, stores `token` and `device_id` in localStorage
-- Send Event: test ingest; POST `/api/device/events/` (Bearer token). Sends treatment events with `event_id`, `treatment`, `counter`, `ts`
+===============================================================================================================================================================
+====================================================================== PAGES =================================================================================
+===============================================================================================================================================================
+- Dashboard: quick stats, system health, recent activity, top outlets, alerts
+- Outlets: GET `/api/outlets/`
+- Machines: GET `/api/machines/`
+- Devices: GET `/api/devices/`
 
-## API Alignment
-- Device status: `GET /api/devices/all/` (used by Dashboard)
-- Events list: `GET /api/events/?exclude_status=true` (Dashboard recent events)
-- Analytics: `GET /api/events/analytics/?device_id=...&days=...` (Dashboard/Charts)
-- Export: `GET /api/export/?device_id=...&days=...` (CSV)
+===============================================================================================================================================================
+================================================================== API ENDPOINTS USED =========================================================================
+===============================================================================================================================================================
+- Auth: `/api/auth/login/`, `/api/auth/logout/`, `/api/auth/check/`, `/api/auth/user/`
+- Data: `/api/outlets/`, `/api/machines/`, `/api/devices/`, `/api/telemetry/`
+- Device tools (optional): `/api/handshake/`, `/api/device/events/`, `/api/devices-data/`
 
-## ESP32 → Backend → Frontend Flow
-1) ESP32 sends only "treatment" events (on button press) with:
-```
-{
-  "device_id": "esp32-001",
-  "firmware": "1.0.0",
-  "event_id": "esp32-001-0000000123",
-  "event": "treatment",
-  "treatment": "BASIC|STANDARD|PREMIUM",
-  "counter": 124,
-  "ts": "2025-09-16T12:34:56Z"
-}
-```
-2) Backend stores idempotently and updates `DeviceStatus` and `UsageStatistics`.
-3) Frontend pulls devices, events, and analytics via `/api/...` endpoints above.
+===============================================================================================================================================================
+============================================================== ENVIRONMENT / DEPLOYMENT =======================================================================
+===============================================================================================================================================================
+- Development: CRA proxy keeps requests same-origin, cookies included.
+- Production: set `REACT_APP_API_URL` and host behind the same origin if possible.
 
-## Notes
-- Configure CORS on backend if serving frontend from a different origin
-- Use HTTPS and secure auth in production
-- Vite env var: `import.meta.env.VITE_API_BASE`

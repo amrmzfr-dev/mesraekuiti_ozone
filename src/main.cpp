@@ -1,3 +1,20 @@
+// ====================================================================================
+//  OZONE MACHINE FIRMWARE - MAIN ENTRY (single-file layout)
+//  Navigation guide:
+//   - CONFIGURATION ........................................ around line ~15
+//   - GLOBAL OBJECTS ....................................... around line ~60
+//   - RUNTIME STATE ........................................ around line ~69
+//   - FORWARD DECLARATIONS ................................ around line ~90
+//   - BACKEND HELPERS (handshake/events) .................. around line ~129
+//   - ARDUINO LIFECYCLE (setup/loop) ...................... around line ~220
+//   - INPUT HANDLING (buttons) ............................ around line ~335
+//   - TREATMENT CONTROL (start/stop/timer) ................ around line ~437
+//   - DISPLAY (screens) ................................... around line ~526
+//   - POWER-SAVING (LCD sleep) ............................ around line ~568
+//   - HELPERS (names, durations, format) .................. around line ~577
+//   - EEPROM PERSISTENCE .................................. around line ~605
+//   - WI‑FI + LOCAL WEB UI ................................ around line ~643
+// ====================================================================================
 #include <Arduino.h>
 #include <LiquidCrystal_I2C.h>
 #include <Wire.h>
@@ -8,46 +25,36 @@
 #include <RTClib.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <LittleFS.h>
+#include "pins.h"
 
-// I2C pins
-#define SDA_PIN 21
-#define SCL_PIN 22
-
-// RTC pins (separate I2C bus)
-#define RTC_SDA_PIN 25
-#define RTC_SCL_PIN 26
-#define RTC_SQW_PIN 27  // Optional square wave output
-
-// Button pins
-#define BUTTON_UP_PIN 4      // BASIC treatment
-#define BUTTON_DOWN_PIN 14   // STANDARD treatment
-#define BUTTON_SELECT_PIN 15 // PREMIUM treatment
-
-// Relay pins
-#define RELAY_B_PIN 23       // Single relay for all treatments
-#define RELAY_S_PIN 19       // Unused (kept for compatibility)
-#define RELAY_P_PIN 18       // Unused (kept for compatibility)
+// ====================================================================================
+//  SECTION: CONFIGURATION (pins are centralized in include/pins.h)
+// ====================================================================================
 
 // Relay configuration
 #define RELAY_ACTIVE_LOW 1   // Set to 1 if your relay board is active-LOW, 0 for active-HIGH
 #define RELAY_ON_LEVEL (RELAY_ACTIVE_LOW ? LOW : HIGH)
 #define RELAY_OFF_LEVEL (RELAY_ACTIVE_LOW ? HIGH : LOW)
 
+// ------------------------------------------------------------------------------------
 // LCD configuration
-#define LCD_ADDRESS 0x27
 #define LCD_COLUMNS 20
 #define LCD_ROWS 4
 
+// ------------------------------------------------------------------------------------
 // Timer durations (milliseconds)
 #define TIMER_BASIC_DURATION 5000     // 5 seconds (testing)
 #define TIMER_STANDARD_DURATION 10000 // 10 seconds (testing)
 #define TIMER_PREMIUM_DURATION 15000  // 15 seconds (testing)
 
+// ------------------------------------------------------------------------------------
 // System timing
 #define STARTUP_DELAY 1000           // Wait 1 second after startup before accepting button presses
 #define STOP_HOLD_TIME 2000          // Hold SELECT for 2 seconds to stop timer
 #define LCD_SLEEP_TIMEOUT 120000     // 2 minutes idle -> backlight off (no sleep during timer)
 
+// ------------------------------------------------------------------------------------
 // EEPROM settings
 #define EEPROM_SIZE 512              // Size of EEPROM to use
 #define COUNTERS_START_ADDR 0        // Starting address for counters storage
@@ -64,6 +71,7 @@
 #define DEV_DEVICE_ID_ADDR 140       // device_id start (max 64)
 #define DEV_TOKEN_ADDR     204       // token start (max 128)
 
+// ------------------------------------------------------------------------------------
 // Backend (production)
 #define BACKEND_BASE "https://www.ozone-p2.mesraekuiti.com"
 #define URL_HANDSHAKE BACKEND_BASE "/api/handshake/"
@@ -71,9 +79,22 @@
 #define HTTPS_TIMEOUT_MS 5000
 #define USE_INSECURE_TLS 1  // Set 0 when proper root CA is embedded
 
+// ------------------------------------------------------------------------------------
 // Web server
 #define WEB_SERVER_PORT 80
 
+// ------------------------------------------------------------------------------------
+// Event queue configuration
+#define EVENT_QUEUE_FILE "/events.jsonl"
+#define MAX_QUEUE_SIZE (4 * 1024 * 1024)  // 4MB max queue size
+#define MAX_RETRY_ATTEMPTS 10
+#define RETRY_BASE_DELAY_MS 2000
+#define RETRY_MAX_DELAY_MS 300000  // 5 minutes
+#define RETRY_JITTER_PERCENT 20
+
+// ====================================================================================
+//  SECTION: GLOBAL OBJECTS
+// ====================================================================================
 // LCD object
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS);
 
@@ -83,6 +104,9 @@ RTC_DS3231 rtc;
 // Web server
 WebServer server(WEB_SERVER_PORT);
 
+// ====================================================================================
+//  SECTION: RUNTIME STATE
+// ====================================================================================
 // System state
 bool systemReady = false;
 bool displayNeedsUpdate = true;
@@ -104,7 +128,44 @@ String g_firmware = "1.0.0";
 // Provisioning/assignment placeholder (for web UI status)
 bool deviceAssigned = false;
 
+// Event queue state
+bool queueInitialized = false;
+unsigned long lastUploadAttempt = 0;
+int currentRetryDelay = RETRY_BASE_DELAY_MS;
+int retryAttempts = 0;
+
+// ====================================================================================
+//  SECTION: RTOS PRIMITIVES (Queues/Tasks)
+// ====================================================================================
+enum ControlMsgType { CTL_START_B = 0, CTL_START_S = 1, CTL_START_P = 2, CTL_STOP = 3 };
+typedef struct {
+  ControlMsgType type;
+} ControlMsg;
+
+typedef struct {
+  char treatment[10]; // "BASIC"|"STANDARD"|"PREMIUM"
+  int counter;
+} NetEvent;
+
+// Queues
+static QueueHandle_t g_controlQueue = nullptr;   // Button/input → control
+static QueueHandle_t g_netQueue = nullptr;       // Control → network (treatment started)
+
+// Task handles
+static TaskHandle_t hTaskInput = nullptr;
+static TaskHandle_t hTaskControl = nullptr;
+static TaskHandle_t hTaskDisplay = nullptr;
+static TaskHandle_t hTaskNet = nullptr;
+
+// ====================================================================================
+//  SECTION: FORWARD DECLARATIONS
+// ====================================================================================
 // Function declarations (existing)
+// Task forward declarations
+void TaskInput(void*);
+void TaskControl(void*);
+void TaskDisplay(void*);
+void TaskNet(void*);
 void handleButtons();
 void startTreatment(int treatmentIdx);
 void stopTreatment();
@@ -126,7 +187,20 @@ void handleCounters();
 void saveWiFiCredentials(const String& ssid, const String& password);
 void loadWiFiCredentials(String& ssid, String& password);
 
-// New: backend helpers
+// Event queue functions
+bool initializeEventQueue();
+bool appendEventToQueue(const String& eventJson);
+bool processEventQueue();
+String readNextEventFromQueue();
+bool removeEventFromQueue();
+bool isQueueEmpty();
+size_t getQueueSize();
+void resetRetryDelay();
+int calculateRetryDelay();
+
+// ====================================================================================
+//  SECTION: BACKEND HELPERS (handshake + event upload)
+// ====================================================================================
 void saveDeviceAuthToEEPROM(const String &devId, const String &token) {
   // device_id (max 64)
   for (int i = 0; i < (int)devId.length() && i < 64; i++) EEPROM.write(DEV_DEVICE_ID_ADDR + i, devId[i]);
@@ -193,16 +267,8 @@ bool postTreatmentEvent(const String &treatment, int counterVal, const String &i
     Serial.println("Missing device auth; performing handshake...");
     if (!performHandshake()) return false;
   }
-  WiFiClientSecure client;
-#if USE_INSECURE_TLS
-  client.setInsecure();
-#endif
-  HTTPClient http;
-  if (!http.begin(client, URL_EVENTS)) return false;
-  http.setTimeout(HTTPS_TIMEOUT_MS);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + g_deviceToken);
-
+  
+  // Create event JSON
   JsonDocument body;
   body["device_id"] = g_deviceId;
   body["firmware"] = g_firmware;
@@ -211,19 +277,18 @@ bool postTreatmentEvent(const String &treatment, int counterVal, const String &i
   body["treatment"] = treatment;
   body["counter"] = counterVal;
   body["ts"] = isoTs;
-  String payload; serializeJson(body, payload);
-
-  int code = http.POST(payload);
-  if (code > 0) {
-    String resp = http.getString();
-    Serial.printf("Event POST code=%d resp=%s\n", code, resp.c_str());
-    http.end();
-    return (code >= 200 && code < 300);
+  String payload; 
+  serializeJson(body, payload);
+  
+  // Append to queue instead of direct HTTP
+  bool success = appendEventToQueue(payload);
+  if (success) {
+    Serial.printf("Event queued: %s\n", treatment.c_str());
   } else {
-    Serial.printf("Event POST error=%d\n", code);
+    Serial.printf("Failed to queue event: %s\n", treatment.c_str());
   }
-  http.end();
-  return false;
+  
+  return success;
 }
 
 String nowIsoTimestamp() {
@@ -234,6 +299,9 @@ String nowIsoTimestamp() {
   return String(ts);
 }
 
+// ====================================================================================
+//  SECTION: ARDUINO LIFECYCLE
+// ====================================================================================
 void setup() {
   Serial.begin(115200);
   delay(1000); // Reduced from 2000ms
@@ -242,7 +310,7 @@ void setup() {
   Serial.println("Initializing...");
   
   // Initialize I2C and LCD FIRST
-  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
   lcd.init();
   lcd.backlight();
   lcd.clear();
@@ -281,17 +349,21 @@ void setup() {
   pinMode(BUTTON_DOWN_PIN, INPUT_PULLUP);    // STANDARD
   pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);  // PREMIUM
   
-  // Initialize relays
-  pinMode(RELAY_B_PIN, OUTPUT);
-  pinMode(RELAY_S_PIN, OUTPUT);
-  pinMode(RELAY_P_PIN, OUTPUT);
-  digitalWrite(RELAY_B_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(RELAY_S_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(RELAY_P_PIN, RELAY_OFF_LEVEL);
+  // Initialize relay (single channel)
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
   
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
   loadCountersFromEEPROM();
+  
+  // Initialize LittleFS for event queue
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS initialization failed!");
+  } else {
+    Serial.println("LittleFS initialized successfully");
+    initializeEventQueue();
+  }
   
   // Setup Wi-Fi and web server (this takes time)
   setupWiFi();
@@ -318,41 +390,34 @@ void setup() {
   
   Serial.println("System initialized successfully!");
   Serial.println("Waiting 1 second before accepting button input...");
+
+  // ==================================================================================
+  // Create RTOS Queues
+  g_controlQueue = xQueueCreate(16, sizeof(ControlMsg));
+  g_netQueue = xQueueCreate(8, sizeof(NetEvent));
+  
+  // Create RTOS Tasks
+#if CONFIG_FREERTOS_UNICORE
+  const BaseType_t coreUI = 0;
+  const BaseType_t coreNET = 0;
+#else
+  const BaseType_t coreUI = 1;   // APP core
+  const BaseType_t coreNET = 0;  // PRO core
+#endif
+  xTaskCreatePinnedToCore(TaskInput,   "TaskInput",   4096, nullptr, 4, &hTaskInput, coreUI);
+  xTaskCreatePinnedToCore(TaskControl, "TaskControl", 4096, nullptr, 3, &hTaskControl, coreUI);
+  xTaskCreatePinnedToCore(TaskDisplay, "TaskDisplay", 4096, nullptr, 2, &hTaskDisplay, coreUI);
+  xTaskCreatePinnedToCore(TaskNet,     "TaskNet",     6144, nullptr, 1, &hTaskNet,     coreNET);
 }
 
 void loop() {
-  // Set system ready after startup delay
-  if (!systemReady && millis() >= STARTUP_DELAY) {
-    systemReady = true;
-    displayNeedsUpdate = true;
-    Serial.println("System ready - accepting button input");
-  }
-  
-  // Handle buttons
-  handleButtons();
-  
-  // Handle timer
-  if (timerActive) {
-    updateTimer();
-  }
-  
-  // Handle LCD sleep
-  handleLCDSleep();
-  
-  // Update display only when needed and with proper timing
-  static unsigned long lastDisplayUpdate = 0;
-  if (displayNeedsUpdate && (millis() - lastDisplayUpdate > 100)) { // Update max every 100ms
-    updateDisplay();
-    displayNeedsUpdate = false;
-    lastDisplayUpdate = millis();
-  }
-  
-  // Handle web server
-  server.handleClient();
-  
-  delay(50); // Increased delay to reduce CPU usage
+  // Idle loop – RTOS tasks handle the workload now
+  vTaskDelay(pdMS_TO_TICKS(250));
 }
 
+// ====================================================================================
+//  SECTION: INPUT HANDLING (buttons + long-press stop)
+// ====================================================================================
 void handleButtons() {
   // Simple button reading - no bullshit debouncing
   bool basicPressed = (digitalRead(BUTTON_UP_PIN) == LOW);
@@ -455,6 +520,9 @@ void handleButtons() {
   }
 }
 
+// ====================================================================================
+//  SECTION: TREATMENT CONTROL (start/stop/timer)
+// ====================================================================================
 void startTreatment(int treatmentIdx) {
   if (timerActive) {
     Serial.println("Timer already active, ignoring button press");
@@ -470,7 +538,7 @@ void startTreatment(int treatmentIdx) {
   saveCountersToEEPROM();
   
   // Activate relay
-  digitalWrite(RELAY_B_PIN, RELAY_ON_LEVEL);
+  digitalWrite(RELAY_PIN, RELAY_ON_LEVEL);
   
   // Wake up LCD
   lcd.backlight();
@@ -496,7 +564,7 @@ void startTreatment(int treatmentIdx) {
 
 void stopTreatment() {
   timerActive = false;
-  digitalWrite(RELAY_B_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
   displayNeedsUpdate = true;
   
   // Log treatment stop with timestamp
@@ -517,7 +585,7 @@ void updateTimer() {
   if (elapsed >= totalDuration) {
     // Timer completed
     timerActive = false;
-    digitalWrite(RELAY_B_PIN, RELAY_OFF_LEVEL);
+    digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
     displayNeedsUpdate = true;
     
     // Log treatment completion with timestamp
@@ -544,6 +612,9 @@ void updateTimer() {
   }
 }
 
+// ====================================================================================
+//  SECTION: DISPLAY (main/timer screens)
+// ====================================================================================
 void updateDisplay() {
   lcd.clear();
   
@@ -586,6 +657,9 @@ void updateTimerDisplay() {
   lcd.print(formatTime(timerRemaining));
 }
 
+// ====================================================================================
+//  SECTION: POWER-SAVING (LCD backlight sleep)
+// ====================================================================================
 void handleLCDSleep() {
   if (!timerActive && systemReady) {
     if (millis() - lastInteractionTime > LCD_SLEEP_TIMEOUT && !lcdSleeping) {
@@ -595,6 +669,9 @@ void handleLCDSleep() {
   }
 }
 
+// ====================================================================================
+//  SECTION: HELPERS (names, durations, time formatting)
+// ====================================================================================
 String getTreatmentName(int treatmentIdx) {
   switch (treatmentIdx) {
     case 0: return String("BASIC TREATMENT");
@@ -623,6 +700,9 @@ String formatTime(unsigned long milliseconds) {
   return String(timeStr);
 }
 
+// ====================================================================================
+//  SECTION: EEPROM PERSISTENCE (counters + credentials)
+// ====================================================================================
 void saveCountersToEEPROM() {
   for (int i = 0; i < 3; i++) {
     EEPROM.write(COUNTERS_START_ADDR + i * 4, (counters[i] >> 24) & 0xFF);
@@ -661,6 +741,9 @@ void loadCountersFromEEPROM() {
   Serial.printf("Counters: B=%d S=%d P=%d\n", counters[0], counters[1], counters[2]);
 }
 
+// ====================================================================================
+//  SECTION: WI‑FI + LOCAL WEB UI
+// ====================================================================================
 // Wi-Fi and Web Server Functions
 void setupWiFi() {
   // Load Wi-Fi credentials from EEPROM
@@ -886,5 +969,276 @@ void loadWiFiCredentials(String& ssid, String& password) {
     if (c >= 32 && c <= 126) { // Only add printable ASCII characters
       password += c;
     }
+  }
+}
+
+// ====================================================================================
+//  SECTION: EVENT QUEUE IMPLEMENTATION
+// ====================================================================================
+
+bool initializeEventQueue() {
+  if (queueInitialized) return true;
+  
+  // Check if queue file exists, create if not
+  if (!LittleFS.exists(EVENT_QUEUE_FILE)) {
+    File file = LittleFS.open(EVENT_QUEUE_FILE, "w");
+    if (!file) {
+      Serial.println("Failed to create event queue file");
+      return false;
+    }
+    file.close();
+    Serial.println("Created new event queue file");
+  }
+  
+  queueInitialized = true;
+  Serial.printf("Event queue initialized. Size: %zu bytes\n", getQueueSize());
+  return true;
+}
+
+bool appendEventToQueue(const String& eventJson) {
+  if (!queueInitialized) {
+    if (!initializeEventQueue()) return false;
+  }
+  
+  // Check queue size limit
+  size_t currentSize = getQueueSize();
+  if (currentSize > MAX_QUEUE_SIZE) {
+    Serial.println("Event queue size limit reached, dropping event");
+    return false;
+  }
+  
+  File file = LittleFS.open(EVENT_QUEUE_FILE, "a");
+  if (!file) {
+    Serial.println("Failed to open event queue file for append");
+    return false;
+  }
+  
+  file.println(eventJson);
+  file.close();
+  
+  Serial.printf("Event appended to queue. New size: %zu bytes\n", getQueueSize());
+  return true;
+}
+
+String readNextEventFromQueue() {
+  if (!queueInitialized || isQueueEmpty()) return "";
+  
+  File file = LittleFS.open(EVENT_QUEUE_FILE, "r");
+  if (!file) {
+    Serial.println("Failed to open event queue file for read");
+    return "";
+  }
+  
+  String event = file.readStringUntil('\n');
+  file.close();
+  
+  return event;
+}
+
+bool removeEventFromQueue() {
+  if (!queueInitialized || isQueueEmpty()) return false;
+  
+  // Read all events except the first one
+  File file = LittleFS.open(EVENT_QUEUE_FILE, "r");
+  if (!file) {
+    Serial.println("Failed to open event queue file for removal");
+    return false;
+  }
+  
+  String content = "";
+  String line = file.readStringUntil('\n'); // Skip first line
+  while (file.available()) {
+    content += file.readStringUntil('\n') + "\n";
+  }
+  file.close();
+  
+  // Write back without the first line
+  file = LittleFS.open(EVENT_QUEUE_FILE, "w");
+  if (!file) {
+    Serial.println("Failed to open event queue file for write");
+    return false;
+  }
+  
+  file.print(content);
+  file.close();
+  
+  return true;
+}
+
+bool isQueueEmpty() {
+  if (!queueInitialized) return true;
+  
+  File file = LittleFS.open(EVENT_QUEUE_FILE, "r");
+  if (!file) return true;
+  
+  bool isEmpty = !file.available();
+  file.close();
+  return isEmpty;
+}
+
+size_t getQueueSize() {
+  if (!queueInitialized) return 0;
+  
+  File file = LittleFS.open(EVENT_QUEUE_FILE, "r");
+  if (!file) return 0;
+  
+  size_t size = file.size();
+  file.close();
+  return size;
+}
+
+void resetRetryDelay() {
+  currentRetryDelay = RETRY_BASE_DELAY_MS;
+  retryAttempts = 0;
+}
+
+int calculateRetryDelay() {
+  if (retryAttempts >= MAX_RETRY_ATTEMPTS) {
+    return RETRY_MAX_DELAY_MS;
+  }
+  
+  int delay = currentRetryDelay;
+  currentRetryDelay = min(currentRetryDelay * 2, RETRY_MAX_DELAY_MS);
+  retryAttempts++;
+  
+  // Add jitter (±20%)
+  int jitter = (delay * RETRY_JITTER_PERCENT) / 100;
+  int jitterValue = random(-jitter, jitter + 1);
+  
+  return max(delay + jitterValue, 1000); // Minimum 1 second
+}
+
+bool processEventQueue() {
+  if (isQueueEmpty()) return true;
+  
+  String eventJson = readNextEventFromQueue();
+  if (eventJson.isEmpty()) return false;
+  
+  // Parse event JSON
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, eventJson);
+  if (error) {
+    Serial.printf("Failed to parse event JSON: %s\n", error.c_str());
+    removeEventFromQueue(); // Remove malformed event
+    return false;
+  }
+  
+  // Send HTTP request
+  WiFiClientSecure client;
+#if USE_INSECURE_TLS
+  client.setInsecure();
+#endif
+  HTTPClient http;
+  if (!http.begin(client, URL_EVENTS)) {
+    Serial.println("Failed to begin HTTP client");
+    return false;
+  }
+  
+  http.setTimeout(HTTPS_TIMEOUT_MS);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + g_deviceToken);
+  
+  int code = http.POST(eventJson);
+  bool success = false;
+  
+  if (code > 0) {
+    String resp = http.getString();
+    Serial.printf("Event upload code=%d resp=%s\n", code, resp.c_str());
+    
+    if (code >= 200 && code < 300) {
+      success = true;
+      removeEventFromQueue();
+      resetRetryDelay();
+      Serial.println("Event successfully uploaded and removed from queue");
+    } else {
+      Serial.printf("Server error: %d\n", code);
+    }
+  } else {
+    Serial.printf("Network error: %d\n", code);
+  }
+  
+  http.end();
+  return success;
+}
+
+// ====================================================================================
+//  SECTION: RTOS TASK IMPLEMENTATIONS
+// ====================================================================================
+
+void TaskInput(void* pvParameters) {
+  Serial.println("TaskInput started");
+  
+  while (true) {
+    handleButtons();
+    vTaskDelay(pdMS_TO_TICKS(50)); // 50ms polling
+  }
+}
+
+void TaskControl(void* pvParameters) {
+  Serial.println("TaskControl started");
+  
+  while (true) {
+    ControlMsg msg;
+    if (xQueueReceive(g_controlQueue, &msg, pdMS_TO_TICKS(100)) == pdTRUE) {
+      switch (msg.type) {
+        case CTL_START_B:
+          startTreatment(0); // BASIC
+          break;
+        case CTL_START_S:
+          startTreatment(1); // STANDARD
+          break;
+        case CTL_START_P:
+          startTreatment(2); // PREMIUM
+          break;
+        case CTL_STOP:
+          stopTreatment();
+          break;
+      }
+    }
+    
+    // Update timer if active
+    if (timerActive) {
+      updateTimer();
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+void TaskDisplay(void* pvParameters) {
+  Serial.println("TaskDisplay started");
+  
+  while (true) {
+    if (displayNeedsUpdate) {
+      updateDisplay();
+      displayNeedsUpdate = false;
+    }
+    
+    handleLCDSleep();
+    vTaskDelay(pdMS_TO_TICKS(500)); // 500ms refresh rate
+  }
+}
+
+void TaskNet(void* pvParameters) {
+  Serial.println("TaskNet started");
+  
+  while (true) {
+    // Process event queue
+    if (WiFi.status() == WL_CONNECTED && !isQueueEmpty()) {
+      unsigned long now = millis();
+      
+      // Check if it's time for next upload attempt
+      if (now - lastUploadAttempt >= currentRetryDelay) {
+        bool success = processEventQueue();
+        lastUploadAttempt = now;
+        
+        if (!success) {
+          int newDelay = calculateRetryDelay();
+          Serial.printf("Upload failed, retrying in %d ms (attempt %d)\n", newDelay, retryAttempts);
+        }
+      }
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Check every second
   }
 }

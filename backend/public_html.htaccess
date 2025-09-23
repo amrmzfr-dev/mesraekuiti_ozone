@@ -1,0 +1,23 @@
+# CORS Headers for cross-origin requests
+Header always set Access-Control-Allow-Origin "https://www.ozone-p2-tracking.mesraekuiti.com"
+Header always set Vary "Origin"
+Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-CSRFToken, X-Requested-With"
+Header always set Access-Control-Allow-Credentials "true"
+
+RewriteEngine On
+
+# Block serving static assets from this vhost (API-only)
+RewriteRule ^static/ - [R=403,L]
+RewriteRule ^staticfiles/ - [R=403,L]
+
+# Custom Django environment variables
+PassengerEnvVar DJANGO_SETTINGS_MODULE ozontelemetry.settings
+SetEnv DJANGO_SETTINGS_MODULE ozontelemetry.settings
+PassengerAppEnv production
+
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION BEGIN
+PassengerAppRoot "/home/mesraeku/ozone-p2-backend"
+PassengerBaseURI "/"
+PassengerPython "/home/mesraeku/virtualenv/ozone-p2-backend/3.11/bin/python"
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION END

@@ -29,8 +29,9 @@ DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
 ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
-    '.yourdomain.com',  # Replace with your actual domain
-    # Add your cPanel domain here
+    'www.ozone-p2.mesraekuiti.com',
+    'ozone-p2.mesraekuiti.com',
+    '.mesraekuiti.com',
 ]
 
 
@@ -42,7 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
-    'django.contrib.staticfiles',
+    # 'django.contrib.staticfiles',  # Disabled: API-only, no static assets
     'rest_framework',
     'corsheaders',
     'telemetry',
@@ -125,25 +126,60 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.2/howto/static-files/
-
-# DEBUG: enable for local dev
-DEBUG = True
-
-STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_DIRS = [
-    BASE_DIR / 'static',
-]
+# Static files disabled - API only
+# If you need admin UI assets, re-enable django.contrib.staticfiles and these settings
+STATIC_URL = '/_no_static_/'
+# STATIC_ROOT = BASE_DIR / 'staticfiles'
+# STATICFILES_DIRS = [
+#     BASE_DIR / 'static',
+# ]
 
 
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# CORS Configuration - DISABLED FOR DEBUGGING
 CORS_ALLOW_ALL_ORIGINS = True
-CSRF_TRUSTED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000']
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = ['*']
+CORS_ALLOW_METHODS = ['*']
+
+# Disable CORS middleware entirely (alternative approach)
+# CORS_ALLOW_ALL_ORIGINS = False
+# CORS_ALLOWED_ORIGINS = [
+#     'https://www.ozone-p2-tracking.mesraekuiti.com',
+#     'https://www.ozone-p2.mesraekuiti.com',
+# ]
+
+# CSRF Configuration
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:3000', 
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:8000',
+    'http://localhost:8000',
+    'https://www.ozone-p2.mesraekuiti.com',
+    'https://ozone-p2.mesraekuiti.com',
+    'https://www.ozone-p2-tracking.mesraekuiti.com',
+]
+
+# Cookie settings
+# For production HTTPS, use SameSite=None and Secure=True
+SESSION_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SAMESITE = 'None'
+# Ensure cookies are valid across subdomains
+SESSION_COOKIE_DOMAIN = '.mesraekuiti.com'
+CSRF_COOKIE_DOMAIN = '.mesraekuiti.com'
+
+# Use secure cookies in production; allow insecure in local development
+if DEBUG:
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    CSRF_COOKIE_SAMESITE = 'Lax'
+else:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 # MQTT Configuration removed - using HTTPS only
 
@@ -155,3 +191,22 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Authentication settings
 LOGIN_REDIRECT_URL = '/'  # Redirect to home page after login
 LOGIN_URL = '/accounts/login/'  # Login page URL
+
+# Django REST Framework settings
+REST_FRAMEWORK = {
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+    'DEFAULT_PARSER_CLASSES': [
+        'rest_framework.parsers.JSONParser',
+    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'telemetry.jwt_auth.JwtAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+}
+
+# CORS methods and headers already set above with ['*']
+# Removing duplicate/conflicting configuration
