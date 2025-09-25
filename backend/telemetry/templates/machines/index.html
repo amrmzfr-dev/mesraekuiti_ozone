@@ -1,0 +1,172 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Machines - Ozone Machine Management{% endblock %}
+
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0;">
+  <h1 style="margin:0;">Machines</h1>
+  <a href="/machines/create/" class="btn btn-primary">Create Machine</a>
+</div>
+
+<!-- Statistics -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="stat-number">{{ total_machines }}</div>
+    <div class="stat-label">Total Machines</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ active_machines }}</div>
+    <div class="stat-label">Active Machines</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ assigned_machines }}</div>
+    <div class="stat-label">Assigned to Outlets</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ machines_with_devices }}</div>
+    <div class="stat-label">With Devices</div>
+  </div>
+</div>
+
+{% include 'machines/_list.html' %}
+
+<!-- Assignment Modal -->
+<div id="assignModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:2000">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:2rem;border-radius:8px;min-width:400px">
+    <h3>Assign Machine to Outlet</h3>
+    <form id="assignForm" method="POST">
+      {% csrf_token %}
+      <div class="form-group">
+        <label>Select Outlet:</label>
+        <select name="outlet_id" required>
+          <option value="">Choose an outlet...</option>
+          {% for outlet in outlets %}
+            <option value="{{ outlet.outlet_id }}">{{ outlet.outlet_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Assign</button>
+        <button type="button" onclick="closeAssignModal()" class="btn btn-secondary">Cancel</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+// SIMPLE MACHINES TABLE UPDATE
+console.log('🔥 MACHINES PAGE LOADED');
+
+// Helper function to get device status badge HTML
+function getDeviceStatusBadge(device) {
+  if (!device) {
+    return '<span class="status-badge status-offline">No Device</span>';
+  }
+  
+  // Use the status from the API response if available
+  if (device.status) {
+    switch(device.status) {
+      case 'online':
+        return '<span class="status-badge status-online">Online</span>';
+      case 'idle':
+        return '<span class="status-badge status-idle">Idle</span>';
+      case 'offline':
+        return '<span class="status-badge status-offline">Offline</span>';
+      default:
+        return '<span class="status-badge status-offline">Unknown</span>';
+    }
+  }
+  
+  // Fallback to offline if no status
+  return '<span class="status-badge status-offline">Offline</span>';
+}
+
+function updateMachinesTable() {
+  console.log('🔄 Updating table...');
+  
+  fetch('/api/devices/')
+    .then(response => response.json())
+    .then(data => {
+      console.log('📡 API Response:', data);
+      
+      const tbody = document.querySelector('#machines-table tbody');
+      if (!tbody) return;
+      
+      // Get machines from Django template
+      const machines = JSON.parse('{{ machines_json|escapejs }}');
+      console.log('📋 Machines:', machines);
+      
+      tbody.innerHTML = '';
+      
+      machines.forEach((machine, index) => {
+        const device = data.devices.find(d => d.bound_machine && d.bound_machine.id === machine.id);
+        
+        const deviceMac = device && device.mac ? device.mac : '<span class=\"text-danger\">No ESP</span>';
+        const basicCount = device && device.counts ? device.counts.basic : 0;
+        const standardCount = device && device.counts ? device.counts.standard : 0;
+        const premiumCount = device && device.counts ? device.counts.premium : 0;
+        const outletName = (machine.outlet && machine.outlet.outlet_name) ? machine.outlet.outlet_name : '<span class=\"text-danger\">Unassigned</span>';
+        
+        console.log(`📊 ${machine.name}: Basic=${basicCount}, Standard=${standardCount}, Premium=${premiumCount}`);
+        
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td>${index + 1}</td>
+          <td>${machine.name}</td>
+          <td>${outletName}</td>
+          <td>${deviceMac}</td>
+          <td>${basicCount}</td>
+          <td>${standardCount}</td>
+          <td>${premiumCount}</td>
+          <td>${machine.installed_at ? new Date(machine.installed_at).toISOString().split('T')[0] : '-'}</td>
+          <td>${getDeviceStatusBadge(machine.device)}</td>
+          <td>
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap;">
+              <a href="/machines/${machine.id}/logs/" class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.5rem">View Logs</a>
+              ${machine.outlet && machine.outlet.outlet_name ? 
+                `<form method="POST" action="/machines/${machine.id}/unassign/" style="display:inline;">
+                  <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]').value}">
+                  <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
+                </form>` :
+                `<button onclick="showAssignModal('${machine.id}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>`
+              }
+              <form method="POST" action="/machines/${machine.id}/delete/" style="display:inline;" onsubmit="return confirm('Delete this machine? This cannot be undone.');">
+                <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]').value}">
+                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Delete</button>
+              </form>
+            </div>
+          </td>
+        `;
+        tbody.appendChild(row);
+      });
+      
+      console.log('✅ Table updated');
+    })
+    .catch(error => {
+      console.error('❌ Error:', error);
+    });
+}
+
+// Update table immediately on page load
+console.log('🚀 Updating machines table immediately...');
+updateMachinesTable();
+
+// Start auto-refresh every 1 second
+console.log('🚀 Starting machines auto-refresh...');
+setInterval(updateMachinesTable, 1000);
+
+window.refreshMachines = updateMachinesTable;
+
+// Assignment modal functions
+function showAssignModal(machineId) {
+  const modal = document.getElementById('assignModal');
+  const form = document.getElementById('assignForm');
+  form.action = '/machines/' + encodeURIComponent(machineId) + '/assign/';
+  modal.style.display = 'block';
+}
+
+function closeAssignModal() {
+  document.getElementById('assignModal').style.display = 'none';
+}
+{% endblock %}

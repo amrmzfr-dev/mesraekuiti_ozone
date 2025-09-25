@@ -1,0 +1,208 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Commands - {{ device.device_id }}{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h1 style="margin: 0;">Device Commands - {{ device.device_id }}</h1>
+    <div style="display: flex; gap: 0.5rem;">
+        <button onclick="refreshCommands()" class="btn btn-info">🔄 Refresh</button>
+        <a href="/devices/{{ device.device_id }}/" class="btn btn-secondary">← Back to Device</a>
+    </div>
+</div>
+
+<!-- Command Statistics -->
+<div class="stats">
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.total }}</div>
+        <div class="stat-label">Total Commands</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.pending }}</div>
+        <div class="stat-label">Pending</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.executed }}</div>
+        <div class="stat-label">Executed</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.failed }}</div>
+        <div class="stat-label">Failed</div>
+    </div>
+</div>
+
+<!-- Create Command Form -->
+<div class="card" style="margin-bottom: 2rem;">
+    <div class="card-header">
+        <h3>Create New Command</h3>
+    </div>
+    <div class="card-body">
+        <form method="POST" action="/devices/{{ device.device_id }}/commands/create/">
+            {% csrf_token %}
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="command_type">Command Type:</label>
+                    <select name="command_type" id="command_type" required>
+                        <option value="">Select command type...</option>
+                        {% for value, label in command_types %}
+                            <option value="{{ value }}">{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="priority">Priority:</label>
+                    <select name="priority" id="priority">
+                        {% for value, label in priority_choices %}
+                            <option value="{{ value }}" {% if value == 'normal' %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="expires_in_hours">Expires in (hours):</label>
+                    <input type="number" name="expires_in_hours" id="expires_in_hours" value="24" min="1" max="168">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="description">Description:</label>
+                <textarea name="description" id="description" rows="3" placeholder="Optional description of the command..."></textarea>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Create Command</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Commands Table -->
+<div class="table-container">
+    <div class="table-scrollable-devices">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Command ID</th>
+                    <th>Type</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Sent</th>
+                    <th>Executed</th>
+                    <th>Retries</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for command in recent_commands %}
+                <tr>
+                    <td>
+                        <code style="font-size: 0.8rem;">{{ command.command_id|truncatechars:20 }}</code>
+                    </td>
+                    <td>{{ command.get_command_type_display }}</td>
+                    <td>
+                        <span class="status-badge 
+                            {% if command.priority == 'critical' %}status-critical
+                            {% elif command.priority == 'high' %}status-high
+                            {% elif command.priority == 'normal' %}status-normal
+                            {% else %}status-low{% endif %}">
+                            {{ command.get_priority_display }}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="status-badge 
+                            {% if command.status == 'executed' %}status-success
+                            {% elif command.status == 'failed' %}status-error
+                            {% elif command.status == 'pending' %}status-warning
+                            {% elif command.status == 'sent' %}status-info
+                            {% else %}status-secondary{% endif %}">
+                            {{ command.get_status_display }}
+                        </span>
+                    </td>
+                    <td>{{ command.created_at|timesince }} ago</td>
+                    <td>
+                        {% if command.sent_at %}
+                            {{ command.sent_at|timesince }} ago
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if command.executed_at %}
+                            {{ command.executed_at|timesince }} ago
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ command.retry_count }}</td>
+                    <td>
+                        {% if command.status == 'failed' and command.can_retry %}
+                            <form method="POST" action="/api/commands/{{ command.command_id }}/retry/" style="display:inline;">
+                                {% csrf_token %}
+                                <button type="submit" class="btn btn-warning" style="font-size:0.75rem;padding:0.25rem 0.5rem">Retry</button>
+                            </form>
+                        {% endif %}
+                        {% if command.description %}
+                            <button onclick="showCommandDetails('{{ command.command_id }}', '{{ command.description|escapejs }}', '{{ command.payload|escapejs }}', '{{ command.error_message|escapejs }}')" class="btn btn-info" style="font-size:0.75rem;padding:0.25rem 0.5rem">Details</button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="9" style="text-align:center;padding:2rem;color:#64748b">
+                        No commands found for this device.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Command Details Modal -->
+<div id="commandModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:2000">
+    <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:2rem;border-radius:8px;min-width:500px;max-width:80vw;max-height:80vh;overflow-y:auto">
+        <h3>Command Details</h3>
+        <div id="commandDetails">
+            <!-- Details will be populated by JavaScript -->
+        </div>
+        <div style="margin-top:1rem;text-align:right">
+            <button onclick="closeCommandModal()" class="btn btn-secondary">Close</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+function showCommandDetails(commandId, description, payload, errorMessage) {
+    const modal = document.getElementById('commandModal');
+    const details = document.getElementById('commandDetails');
+    
+    let html = `<p><strong>Command ID:</strong> <code>${commandId}</code></p>`;
+    
+    if (description) {
+        html += `<p><strong>Description:</strong> ${description}</p>`;
+    }
+    
+    if (payload && payload !== '{}') {
+        html += `<p><strong>Payload:</strong></p><pre style="background:#f5f5f5;padding:1rem;border-radius:4px;overflow-x:auto;">${JSON.stringify(JSON.parse(payload), null, 2)}</pre>`;
+    }
+    
+    if (errorMessage) {
+        html += `<p><strong>Error Message:</strong></p><pre style="background:#fee;padding:1rem;border-radius:4px;color:#c33;">${errorMessage}</pre>`;
+    }
+    
+    details.innerHTML = html;
+    modal.style.display = 'block';
+}
+
+function closeCommandModal() {
+    document.getElementById('commandModal').style.display = 'none';
+}
+
+// Manual refresh function - no auto-refresh to avoid interrupting user
+function refreshCommandsTable() {
+    location.reload();
+}
+
+// Add refresh button functionality
+window.refreshCommands = refreshCommandsTable;
+{% endblock %}

@@ -1,0 +1,18 @@
+<form hx-post="/register/submit/" hx-swap="outerHTML">
+  {% csrf_token %}
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <label>Username</label>
+  <input name="username" required style="width:100%" />
+  <label>Password</label>
+  <input type="password" name="password" required style="width:100%" />
+  <label>Role</label>
+  <select name="role" style="width:100%">
+    <option value="admin">Admin</option>
+    <option value="p2">P2 (Perodua HQ)</option>
+    <option value="dmm">DMM (Perodua Dealer)</option>
+    <option value="dealer" selected>Dealer (Non-Perodua)</option>
+  </select>
+  <button type="submit" style="margin-top:.75rem">Create account</button>
+</form>
+
+

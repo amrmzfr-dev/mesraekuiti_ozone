@@ -1,0 +1,247 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Devices - Ozone Machine Management{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom:0;">ESP32 Devices</h1>
+
+<!-- Statistics -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="stat-number">{{ total_devices }}</div>
+    <div class="stat-label">Total Devices</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ online_devices }}</div>
+    <div class="stat-label">Online (Last 5 min)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ assigned_devices }}/{{ total_devices }}</div>
+    <div class="stat-label">Assigned to Machines</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ unassigned_devices }}</div>
+    <div class="stat-label">Unassigned Devices</div>
+  </div>
+</div>
+
+<!-- Devices Table -->
+<div class="table-container">
+  <div class="table-scrollable-devices">
+    <table id="devices-table" class="table">
+      <thead>
+        <tr>
+          <th>No.</th>
+          <th>Device ID</th>
+          <th>Firmware</th>
+          <th>Status</th>
+          <th>Assignment</th>
+          <th>Outlet</th>
+          <th>Last Seen</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for device in devices %}
+        <tr>
+          <td>{{ forloop.counter }}</td>
+          <td>{{ device.device_id }}</td>
+          <td>{{ device.firmware|default:"Unknown" }}</td>
+          <td>
+            <span class="status-badge status-loading">Loading...</span>
+          </td>
+          <td>
+            {% if device.assigned %}
+              <span class="status-badge status-assigned">{{ device.machine.name|default:"Assigned" }}</span>
+            {% else %}
+              <span class="status-badge status-unassigned">Unassigned</span>
+            {% endif %}
+          </td>
+          <td>{% if device.machine and device.machine.outlet %}{{ device.machine.outlet.outlet_name }}{% else %}-{% endif %}</td>
+          <td>Loading...</td>
+          <td>
+            <a href="/devices/{{ device.device_id }}/commands/" class="btn btn-info" style="font-size:0.75rem;padding:0.25rem 0.5rem">Commands</a>
+            {% if device.assigned %}
+              <form method="POST" action="/devices/{{ device.device_id }}/unassign/" style="display:inline;">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
+              </form>
+            {% else %}
+              <button onclick="showAssignModal('{{ device.device_id }}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="8" style="text-align:center;padding:2rem;color:#64748b">
+            No ESP32 devices detected. Devices will appear here when they connect to the system.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Recent events removed per request -->
+
+<!-- Assignment Modal -->
+<div id="assignModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:2000">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:2rem;border-radius:8px;min-width:400px">
+    <h3>Assign Device to Machine</h3>
+    <form id="assignForm" method="POST">
+      {% csrf_token %}
+      <div class="form-group">
+        <label>Select Machine:</label>
+        <select name="machine_id" required>
+          <option value="">Choose a machine...</option>
+          {% for machine in machines %}
+            <option value="{{ machine.machine_id }}">{{ machine.machine_code }} ({{ machine.outlet.outlet_name|default:"No Outlet" }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Assign</button>
+        <button type="button" onclick="closeAssignModal()" class="btn btn-secondary">Cancel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Quick Command Modal removed per request -->
+
+{% endblock %}
+
+
+{% block extra_js %}
+function showAssignModal(deviceId) {
+  const modal = document.getElementById('assignModal');
+  const form = document.getElementById('assignForm');
+  form.action = '/devices/' + encodeURIComponent(deviceId) + '/assign/';
+  modal.style.display = 'block';
+}
+
+function closeAssignModal() {
+  document.getElementById('assignModal').style.display = 'none';
+}
+
+// Quick Command modal removed per request
+
+// BULLETPROOF DEVICES UI UPDATE SYSTEM
+console.log('🔥 DEVICES PAGE LOADED - STARTING UI UPDATES');
+
+// Helper function to get status badge HTML
+function getStatusBadge(status) {
+  switch(status) {
+    case 'online':
+      return '<span class="status-badge status-online">Online</span>';
+    case 'idle':
+      return '<span class="status-badge status-idle">Idle</span>';
+    case 'offline':
+      return '<span class="status-badge status-offline">Offline</span>';
+    default:
+      return '<span class="status-badge status-offline">Unknown</span>';
+  }
+}
+
+// Helper function to format last seen timestamp
+function formatLastSeen(lastSeen) {
+  if (!lastSeen) return 'Never';
+  
+  const now = new Date();
+  const lastSeenDate = new Date(lastSeen);
+  const diffMs = now - lastSeenDate;
+  const diffMinutes = Math.floor(diffMs / (1000 * 60));
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  
+  if (diffMinutes < 1) {
+    return 'Just now';
+  } else if (diffMinutes < 60) {
+    return `${diffMinutes}m ago`;
+  } else if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  } else {
+    return `${diffDays}d ago`;
+  }
+}
+
+// Simple function to update the devices table
+function updateDevicesTable() {
+  console.log('🔄 Updating devices table...');
+  
+  fetch('/api/devices/')
+    .then(response => response.json())
+    .then(data => {
+      console.log('📡 Devices API Response:', data);
+      
+      const tbody = document.querySelector('#devices-table tbody');
+      if (!tbody) {
+        console.error('❌ Devices table not found!');
+        return;
+      }
+      
+      // Clear table
+      tbody.innerHTML = '';
+      
+      if (data.devices.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="8" style="text-align:center;padding:2rem;color:#64748b">
+              No ESP32 devices detected. Devices will appear here when they connect to the system.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+      
+      // Rebuild table
+      data.devices.forEach((device, index) => {
+        console.log(`🔍 Device ${device.device_id}:`, device);
+        
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td>${index + 1}</td>
+          <td>${device.device_id}</td>
+          <td>${device.firmware || 'Unknown'}</td>
+          <td>${getStatusBadge(device.status)}</td>
+          <td>${device.assigned && device.bound_machine ? `<span class="status-badge status-assigned">${device.bound_machine.name}</span>` : '<span class="status-badge status-unassigned">Unassigned</span>'}</td>
+          <td>${(device.bound_machine && device.bound_machine.outlet_name) ? device.bound_machine.outlet_name : '-'}</td>
+          <td>${formatLastSeen(device.last_seen)}</td>
+          <td>
+            <a href="/devices/${device.device_id}/commands/" class="btn btn-info" style="font-size:0.75rem;padding:0.25rem 0.5rem">Commands</a>
+            ${device.assigned ? 
+              `<form method="POST" action="/devices/${device.device_id}/unassign/" style="display:inline;">
+                <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]').value}">
+                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
+              </form>` :
+              `<button onclick="showAssignModal('${device.device_id}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>`
+            }
+          </td>
+        `;
+        tbody.appendChild(row);
+      });
+      
+      console.log('✅ Devices table updated successfully!');
+    })
+    .catch(error => {
+      console.error('❌ Devices update error:', error);
+    });
+}
+
+// Update table immediately on page load
+console.log('🚀 Updating devices table immediately...');
+updateDevicesTable();
+
+// Start auto-refresh every 1 second
+console.log('🚀 Starting devices auto-refresh...');
+setInterval(updateDevicesTable, 1000);
+
+// Manual refresh function
+window.refreshDevices = updateDevicesTable;
+
+// Initial update
+setTimeout(updateDevicesTable, 1000);
+
+console.log('🎯 DEVICES UI SYSTEM READY!');
+{% endblock %}

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TelemetryEvent, DeviceStatus, UsageStatistics, Outlet, Machine, MachineDevice
+from .models import TelemetryEvent, DeviceStatus, UsageStatistics, Outlet, Machine, MachineDevice, Device
 
 
 class TelemetryEventSerializer(serializers.ModelSerializer):
@@ -67,6 +67,8 @@ class UsageStatisticsSerializer(serializers.ModelSerializer):
 
 class OutletSerializer(serializers.ModelSerializer):
     machine_count = serializers.SerializerMethodField()
+    machines = serializers.SerializerMethodField()
+    total_treatments = serializers.SerializerMethodField()
     
     class Meta:
         model = Outlet
@@ -81,10 +83,29 @@ class OutletSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "machine_count",
+            "machines",
+            "total_treatments",
         ]
     
     def get_machine_count(self, obj):
         return obj.machines.filter(is_active=True).count()
+
+    def get_machines(self, obj):
+        from .serializers import MachineSerializer
+        qs = obj.machines.select_related('outlet').all()
+        return MachineSerializer(qs, many=True).data
+
+    def get_total_treatments(self, obj):
+        from .models import TelemetryEvent
+        # Sum BASIC/STANDARD/PREMIUM counts for machines under this outlet
+        device_ids = list(obj.machines.values_list('devices__device_id', flat=True))
+        device_ids = [d for d in device_ids if d]
+        if not device_ids:
+            return {"basic": 0, "standard": 0, "premium": 0, "total": 0}
+        basic = TelemetryEvent.objects.filter(device_id__in=device_ids, event_type='BASIC').count()
+        standard = TelemetryEvent.objects.filter(device_id__in=device_ids, event_type='STANDARD').count()
+        premium = TelemetryEvent.objects.filter(device_id__in=device_ids, event_type='PREMIUM').count()
+        return {"basic": basic, "standard": standard, "premium": premium, "total": basic+standard+premium}
 
 
 class MachineDeviceSerializer(serializers.ModelSerializer):
@@ -145,6 +166,27 @@ class MachineSerializer(serializers.ModelSerializer):
         current = obj.current_device
         if current:
             return MachineDeviceSerializer(current).data
+        return None
+
+
+class DeviceSerializer(serializers.ModelSerializer):
+    bound_machine = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Device
+        fields = [
+            'mac', 'device_id', 'assigned', 'firmware', 'last_seen', 'notes', 'bound_machine'
+        ]
+
+    def get_bound_machine(self, obj):
+        mapping = MachineDevice.objects.filter(device_id=obj.device_id, is_active=True).select_related('machine').first()
+        if mapping:
+            return {
+                'id': mapping.machine.id,
+                'name': mapping.machine.name,
+                'outlet': mapping.machine.outlet_id,
+                'outlet_name': mapping.machine.outlet.name if mapping.machine.outlet else None,
+            }
         return None
     
     def get_device_status(self, obj):

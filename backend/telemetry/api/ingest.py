@@ -5,9 +5,34 @@ from rest_framework.decorators import api_view, permission_classes
 from django.utils import timezone
 from datetime import datetime, timedelta
 from django.db import transaction
-from telemetry.models import TelemetryEvent, DeviceStatus, UsageStatistics, Device, Machine, MachineDevice
+from telemetry.models import TelemetryEvent, DeviceStatus, UsageStatistics, Device, Machine
 import secrets
 from django.contrib.auth.models import User
+from rest_framework.permissions import IsAuthenticated
+
+
+def _get_device_status(device_status):
+    """Determine device status based on last_poll timestamp (ESP32 command polling)"""
+    if not device_status:
+        return 'offline'
+    
+    # Prefer last_poll (ESP32 command polling) over last_seen (events)
+    poll_time = device_status.last_poll
+    if not poll_time:
+        # Fallback to last_seen if no poll time available
+        poll_time = device_status.last_seen
+        if not poll_time:
+            return 'offline'
+    
+    now = timezone.now()
+    time_diff = now - poll_time
+    
+    if time_diff <= timedelta(minutes=16):
+        return 'online'
+    elif time_diff <= timedelta(hours=1):
+        return 'idle'
+    else:
+        return 'offline'
 
 
 def _safe_number(value):
@@ -120,23 +145,15 @@ def _update_daily_statistics(device_id, event_type, occurred_at):
         stats, created = UsageStatistics.objects.get_or_create(
             device_id=device_id,
             date=date,
-            defaults={
-                'first_event': occurred_at,
-                'last_event': occurred_at,
-            }
+            defaults={}
         )
-        if not created:
-            if not stats.first_event or occurred_at < stats.first_event:
-                stats.first_event = occurred_at
-            if not stats.last_event or occurred_at > stats.last_event:
-                stats.last_event = occurred_at
         if event_type == "BASIC":
             stats.basic_count += 1
         elif event_type == "STANDARD":
             stats.standard_count += 1
         elif event_type == "PREMIUM":
             stats.premium_count += 1
-        stats.total_events += 1
+        stats.total_count += 1
         stats.save()
     except Exception as e:
         print(f"Error updating daily statistics: {e}")
@@ -198,7 +215,7 @@ def flush_all_but_admin(request):
             TelemetryEvent.objects.all().delete()
             UsageStatistics.objects.all().delete()
             DeviceStatus.objects.all().delete()
-            MachineDevice.objects.all().delete()
+            # MachineDevice model removed - devices are now directly linked to machines
             Machine.objects.all().delete()
             Device.objects.all().delete()
 
@@ -219,9 +236,12 @@ def handshake(request):
     device = Device.objects.filter(mac=mac).first()
     if not device:
         device = Device.objects.create(
-            mac=mac, device_id=f"pending-{mac[-6:]}", token=secrets.token_urlsafe(24), assigned=False, firmware=firmware
+            mac=mac, device_id=mac, token=secrets.token_urlsafe(24), assigned=False, firmware=firmware
         )
     else:
+        # Update device_id to match MAC if it was previously different
+        if device.device_id != mac:
+            device.device_id = mac
         device.firmware = firmware or device.firmware
         device.last_seen = timezone.now()
         device.save()
@@ -245,7 +265,7 @@ def _auth_device(request):
     return Device.objects.filter(token=token, assigned=True).first()
 
 
-@api_view(["POST"]) 
+@api_view(["POST"])
 @permission_classes([permissions.AllowAny])
 def events(request):
     device = _auth_device(request)
@@ -257,6 +277,11 @@ def events(request):
     treatment = (data.get("treatment") or "").strip()
     counter = data.get("counter")
     ts = data.get("ts")
+    current_counters = data.get("current_counters", {})
+    
+    # Debug logging
+    print(f"🔍 EVENTS DEBUG: device_id={device.device_id}, event_id={event_id}, treatment={treatment}, counter={counter}")
+    print(f"🔍 CURRENT COUNTERS: {current_counters}")
     if not event_id:
         return Response({"detail": "event_id required"}, status=status.HTTP_400_BAD_REQUEST)
     if event != "treatment" or treatment not in {"BASIC", "STANDARD", "PREMIUM"}:
@@ -267,6 +292,7 @@ def events(request):
         return Response({"detail": "counter must be int"}, status=status.HTTP_400_BAD_REQUEST)
     existing = TelemetryEvent.objects.filter(event_id=event_id).first()
     if existing:
+        print(f"🔍 DUPLICATE EVENT: event_id={event_id} already exists, skipping")
         return Response({"ack": True, "event_id": event_id})
     occurred_at = _parse_timestamp(ts) or timezone.now()
     TelemetryEvent.objects.create(
@@ -284,18 +310,35 @@ def events(request):
         wifi_status=True,
         payload={},
     )
+    # Update device last_seen
+    device.last_seen = timezone.now()
+    device.save()
+    
     ds, _ = DeviceStatus.objects.get_or_create(device_id=device.device_id)
     ds.wifi_connected = True
     ds.device_timestamp = ts
     ds.last_seen = timezone.now()
-    if treatment == "BASIC":
-        ds.current_count_basic = counter
-    elif treatment == "STANDARD":
-        ds.current_count_standard = counter
-    elif treatment == "PREMIUM":
-        ds.current_count_premium = counter
+    
+    # Update counters - prioritize current_counters if provided, otherwise use individual counter
+    if current_counters:
+        # Use the complete current_counters object
+        ds.current_count_basic = current_counters.get("basic", ds.current_count_basic)
+        ds.current_count_standard = current_counters.get("standard", ds.current_count_standard)
+        ds.current_count_premium = current_counters.get("premium", ds.current_count_premium)
+        print(f"🔍 UPDATED FROM CURRENT_COUNTERS: Basic={ds.current_count_basic}, Standard={ds.current_count_standard}, Premium={ds.current_count_premium}")
+    else:
+        # Fallback to individual counter update (legacy behavior)
+        if treatment == "BASIC":
+            ds.current_count_basic = counter
+        elif treatment == "STANDARD":
+            ds.current_count_standard = counter
+        elif treatment == "PREMIUM":
+            ds.current_count_premium = counter
+        print(f"🔍 UPDATED FROM INDIVIDUAL COUNTER: {treatment}={counter}")
+    
     ds.save()
     _update_daily_statistics(device.device_id, treatment, occurred_at)
+    print(f"✅ EVENT CREATED: {treatment} treatment, counter={counter}, new counts: Basic={ds.current_count_basic}, Standard={ds.current_count_standard}, Premium={ds.current_count_premium}")
     return Response({"ack": True, "event_id": event_id})
 
 
@@ -307,18 +350,48 @@ def devices_data_api(request):
     status_map = {ds.device_id: ds for ds in DeviceStatus.objects.all()}
     for d in devices:
         ds = status_map.get(d.device_id)
+        # Prefer device-reported accumulated counters (ESP32), fallback to DB totals
+        if ds is not None:
+            basic_count = getattr(ds, 'current_count_basic', None)
+            standard_count = getattr(ds, 'current_count_standard', None)
+            premium_count = getattr(ds, 'current_count_premium', None)
+        else:
+            basic_count = standard_count = premium_count = None
+        if basic_count is None:
+            basic_count = TelemetryEvent.objects.filter(device_id=d.device_id, event_type='BASIC').count()
+        if standard_count is None:
+            standard_count = TelemetryEvent.objects.filter(device_id=d.device_id, event_type='STANDARD').count()
+        if premium_count is None:
+            premium_count = TelemetryEvent.objects.filter(device_id=d.device_id, event_type='PREMIUM').count()
+
+        # Get bound machine using direct relationship (OneToOne can raise RelatedObjectDoesNotExist)
+        bound_machine = None
+        try:
+            m = d.machine  # may raise RelatedObjectDoesNotExist when no relation exists
+        except Exception:
+            m = None
+        if m:
+            bound_machine = {
+                'id': m.machine_id,
+                'name': getattr(m, 'machine_code', ''),
+                'outlet_id': m.outlet.outlet_id if m.outlet else None,
+                'outlet_name': m.outlet.outlet_name if m.outlet else None,
+            }
+
         context_devices.append({
             'device_id': d.device_id,
             'mac': d.mac,
-            'assigned': d.assigned,
+            # Treat as assigned if a machine relation exists
+            'assigned': bool(bound_machine),
             'firmware': d.firmware,
-            'last_seen': d.last_seen or (ds.last_seen if ds else None),
-            # Consider device online only if seen within last 60 seconds
-            'online': bool(ds and ds.last_seen and ds.last_seen >= timezone.now() - timedelta(seconds=60)),
+            'last_seen': ds.last_poll if ds and ds.last_poll else (ds.last_seen if ds else d.last_seen),
+            # Determine device status based on last_seen
+            'status': _get_device_status(ds),
+            'bound_machine': bound_machine,
             'counts': {
-                'basic': getattr(ds, 'current_count_basic', None) if ds else None,
-                'standard': getattr(ds, 'current_count_standard', None) if ds else None,
-                'premium': getattr(ds, 'current_count_premium', None) if ds else None,
+                'basic': basic_count,
+                'standard': standard_count,
+                'premium': premium_count,
             }
         })
     return Response({'devices': context_devices})
@@ -333,15 +406,15 @@ def devices_online_api(request):
     status_map = {ds.device_id: ds for ds in DeviceStatus.objects.all()}
     for d in devices:
         ds = status_map.get(d.device_id)
-        # Consider device online only if seen within last 60 seconds
-        is_online = bool(ds and ds.last_seen and ds.last_seen >= timezone.now() - timedelta(seconds=60))
-        if is_online:
+        # Only include devices that are online (within 5 minutes)
+        device_status = _get_device_status(ds)
+        if device_status == 'online':
             context_devices.append({
                 'device_id': d.device_id,
                 'mac': d.mac,
                 'assigned': d.assigned,
                 'firmware': d.firmware,
-                'last_seen': d.last_seen or (ds.last_seen if ds else None),
+                'last_seen': ds.last_poll if ds and ds.last_poll else (ds.last_seen if ds else d.last_seen),
                 'online': True,
                 'counts': {
                     'basic': getattr(ds, 'current_count_basic', None) if ds else None,
@@ -356,9 +429,8 @@ def devices_online_api(request):
 @permission_classes([permissions.AllowAny])
 def machines_unregistered_api(request):
     """Return machines that have no active device assigned"""
-    # Get all machines that don't have any active device assignments
-    machines_with_active_devices = MachineDevice.objects.filter(is_active=True).values_list('machine_id', flat=True)
-    unregistered_machines = Machine.objects.exclude(id__in=machines_with_active_devices).order_by('outlet__name', 'name')
+    # Get all machines that don't have any device assigned
+    unregistered_machines = Machine.objects.filter(device__isnull=True).order_by('outlet__name', 'name')
     
     machines_data = []
     for machine in unregistered_machines:
@@ -376,5 +448,56 @@ def machines_unregistered_api(request):
         })
     
     return Response({'machines': machines_data})
+
+
+@api_view(["POST"]) 
+@permission_classes([IsAuthenticated])
+def bind_device_to_machine(request):
+    """Bind a Device to a Machine using direct relationship.
+    Payload: { "device_id": "...", "machine_id": 123 }
+    """
+    try:
+        device_id = (request.data.get("device_id") or "").strip()
+        machine_id = request.data.get("machine_id")
+        if not device_id or not machine_id:
+            return Response({"detail": "device_id and machine_id required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            machine = Machine.objects.get(id=machine_id)
+        except Machine.DoesNotExist:
+            return Response({"detail": "machine not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        device = Device.objects.filter(device_id=device_id).first()
+        if not device:
+            return Response({"detail": "device not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Unassign device from any existing machine
+        if device.machine:
+            device.machine.device = None
+            device.machine.save()
+
+        # Unassign any existing device from the target machine
+        if machine.device:
+            machine.device.machine = None
+            machine.device.save()
+
+        # Create the binding
+        machine.device = device
+        machine.save()
+
+        # Mark device as assigned
+        device.assigned = True
+        device.save()
+
+        if not machine.outlet_id:
+            return Response({"status": "bound", "warning": "Machine has no outlet; assign outlet to include in outlet totals"})
+
+        return Response({
+            "status": "bound",
+            "machine_id": machine.id,
+            "device_id": device.device_id,
+        })
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

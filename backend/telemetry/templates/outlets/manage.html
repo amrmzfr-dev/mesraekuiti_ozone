@@ -1,0 +1,43 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}{{ outlet.outlet_name }} - Manage Outlet{% endblock %}
+
+{% block extra_css %}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+{% endblock %}
+
+{% block breadcrumb %}
+<div class="breadcrumb">
+  <a href="/outlets/">Outlets</a> > {{ outlet.outlet_name }}
+</div>
+{% endblock %}
+
+{% block content %}
+<h1>{{ outlet.outlet_name }}</h1>
+<p><strong>SM:</strong> {{ outlet.pic_sm|default:'-' }} | <strong>SM Number:</strong> {{ outlet.sm_number|default:'-' }}</p>
+
+<div class="grid">
+  <div>
+    <h3>Assigned Machines</h3>
+    {% include 'outlets/_manage_lists.html' %}
+  </div>
+  <div>
+    <h3>Assign Machine</h3>
+    <form method="POST" action="/outlets/{{ outlet.outlet_id }}/assign/">
+      {% csrf_token %}
+      <div class="form-group">
+        <label for="machine_id">Select Machine:</label>
+        <select name="machine_id" required>
+          <option value="">Choose a machine...</option>
+          {% for machine in unassigned %}
+            <option value="{{ machine.machine_id }}">{{ machine.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Assign</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

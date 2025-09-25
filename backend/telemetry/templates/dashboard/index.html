@@ -1,0 +1,37 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Dashboard - Ozone Machine Management{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+<p>Welcome to the Ozone Machine Management System.</p>
+<p>This is the main control center where you can monitor and manage all aspects of your ozone machine operations.</p>
+
+<div class="stats">
+  <div class="stat-card">
+    <div class="stat-number">{{ total_outlets|default:0 }}</div>
+    <div class="stat-label">Total Outlets</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ total_machines|default:0 }}</div>
+    <div class="stat-label">Total Machines</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ total_devices|default:0 }}</div>
+    <div class="stat-label">ESP32 Devices</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ online_devices|default:0 }}</div>
+    <div class="stat-label">Online Devices</div>
+  </div>
+</div>
+
+<div style="margin-top: 2rem;">
+  <h3>Quick Actions</h3>
+  <div style="display: flex; gap: 1rem; margin-top: 1rem;">
+    <a href="/outlets/" class="btn btn-primary">Manage Outlets</a>
+    <a href="/machines/" class="btn btn-primary">Manage Machines</a>
+    <a href="/devices/" class="btn btn-primary">Monitor Devices</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,27 @@
+<div class="card">
+  <h3 style="margin-bottom:1rem;color:#1e40af;font-weight:600">Add New Outlet</h3>
+  <form action="/outlets/create/" method="post">
+    {% csrf_token %}
+    {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+    <div class="form-group">
+      <label>Outlet Name</label>
+      <input name="outlet_name" required />
+    </div>
+    <div style="display:flex; gap:1rem">
+      <div class="form-group" style="flex:1">
+        <label>SM (PIC)</label>
+        <input name="pic_sm" />
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>SM Number</label>
+        <input name="sm_number" />
+      </div>
+    </div>
+    <p style="color:#6b7280;font-size:0.875rem;margin:0.5rem 0">Note: total SVA, avg intake service, and number of machines will be updated later.</p>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">Create Outlet</button>
+    </div>
+  </form>
+</div>
+
+

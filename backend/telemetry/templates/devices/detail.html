@@ -1,0 +1,240 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}{{ device.device_id }} - Device Details{% endblock %}
+
+{% block extra_css %}
+    .device-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:2rem;padding-bottom:1rem;border-bottom:1px solid #e5e7eb}
+    .device-title{font-size:2rem;font-weight:bold;color:#1e40af}
+    .status-badges{display:flex;gap:0.5rem}
+    .info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2rem;margin:2rem 0}
+    .info-section{border:1px solid #e5e7eb;border-radius:8px;padding:1.5rem}
+    .info-section h3{margin-top:0;color:#1e40af;border-bottom:1px solid #e5e7eb;padding-bottom:0.5rem}
+    .info-row{display:flex;justify-content:space-between;margin:0.5rem 0;padding:0.25rem 0}
+    .info-label{font-weight:500;color:#374151}
+    .info-value{color:#64748b}
+    .counters-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin:1rem 0}
+    .counter-card{padding:1rem;background:#f8fafc;border-radius:6px;text-align:center;border-left:4px solid #3b82f6}
+    .counter-number{font-size:2rem;font-weight:bold;color:#1e40af}
+    .counter-label{color:#64748b;font-size:0.875rem}
+    .events-table{width:100%;border-collapse:collapse;margin-top:1rem}
+    .events-table th,.events-table td{padding:0.75rem;text-align:left;border-bottom:1px solid #e5e7eb}
+    .events-table th{background:#f8fafc;font-weight:500;color:#374151}
+    .events-table tr:hover{background:#f8fafc}
+    .treatment-badge{padding:0.25rem 0.5rem;border-radius:4px;font-size:0.75rem;font-weight:500}
+    .treatment-basic{background:#fef3c7;color:#92400e}
+    .treatment-standard{background:#dbeafe;color:#1e40af}
+    .treatment-premium{background:#e0e7ff;color:#3730a3}
+    .usage-stats{margin-top:1rem}
+    .usage-item{display:flex;justify-content:space-between;padding:0.5rem 0;border-bottom:1px solid #e5e7eb}
+    .usage-item:last-child{border-bottom:none}
+{% endblock %}
+
+{% block breadcrumb %}
+<div class="breadcrumb">
+  <a href="/devices/">Devices</a> > {{ device.device_id }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="device-header">
+  <div class="device-title">{{ device.device_id }}</div>
+  <div class="status-badges">
+    {% if device.last_seen %}
+      {% if device.last_seen|timesince|slice:":2" == "0 " or device.last_seen|timesince|slice:":2" == "1 " or device.last_seen|timesince|slice:":2" == "2 " or device.last_seen|timesince|slice:":2" == "3 " or device.last_seen|timesince|slice:":2" == "4 " or device.last_seen|timesince|slice:":2" == "5 " or device.last_seen|timesince|slice:":2" == "6 " or device.last_seen|timesince|slice:":2" == "7 " or device.last_seen|timesince|slice:":2" == "8 " or device.last_seen|timesince|slice:":2" == "9 " or device.last_seen|timesince|slice:":2" == "10" or device.last_seen|timesince|slice:":2" == "11" or device.last_seen|timesince|slice:":2" == "12" or device.last_seen|timesince|slice:":2" == "13" or device.last_seen|timesince|slice:":2" == "14" or device.last_seen|timesince|slice:":2" == "15" %}
+        <span class="status-badge status-online">Online</span>
+      {% elif device.last_seen|timesince|slice:":1" == "1 " %}
+        <span class="status-badge status-idle">Idle</span>
+      {% else %}
+        <span class="status-badge status-offline">Offline</span>
+      {% endif %}
+    {% else %}
+      <span class="status-badge status-offline">Never Seen</span>
+    {% endif %}
+    
+    {% if device.assigned %}
+      <span class="status-badge status-assigned">Assigned</span>
+    {% else %}
+      <span class="status-badge status-unassigned">Unassigned</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="info-grid">
+  <!-- Device Information -->
+  <div class="info-section">
+    <h3>Device Information</h3>
+    <div class="info-row">
+      <span class="info-label">Device ID:</span>
+      <span class="info-value">{{ device.device_id }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">MAC Address:</span>
+      <span class="info-value">{{ device.mac }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Firmware Version:</span>
+      <span class="info-value">{{ device.firmware|default:"Unknown" }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Created:</span>
+      <span class="info-value">{{ device.created_at|date:"M d, Y H:i" }}</span>
+    </div>
+    {% if device.last_seen %}
+    <div class="info-row">
+      <span class="info-label">Last Seen:</span>
+      <span class="info-value">{{ device.last_seen|timesince }} ago</span>
+    </div>
+    {% endif %}
+    {% if device.notes %}
+    <div class="info-row">
+      <span class="info-label">Notes:</span>
+      <span class="info-value">{{ device.notes }}</span>
+    </div>
+    {% endif %}
+  </div>
+  
+  <!-- Device Status -->
+  {% if device_status %}
+  <div class="info-section">
+    <h3>Current Status</h3>
+    <div class="info-row">
+      <span class="info-label">WiFi Connection:</span>
+      <span class="info-value">{% if device_status.wifi_connected %}Connected{% else %}Disconnected{% endif %}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">RTC Available:</span>
+      <span class="info-value">{% if device_status.rtc_available %}Yes{% else %}No{% endif %}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">SD Card Available:</span>
+      <span class="info-value">{% if device_status.sd_card_available %}Yes{% else %}No{% endif %}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Uptime:</span>
+      <span class="info-value">{{ device_status.uptime_seconds }} seconds</span>
+    </div>
+    {% if device_status.device_timestamp %}
+    <div class="info-row">
+      <span class="info-label">Device Timestamp:</span>
+      <span class="info-value">{{ device_status.device_timestamp }}</span>
+    </div>
+    {% endif %}
+    
+    <h4>Treatment Counters</h4>
+    <div class="counters-grid">
+      <div class="counter-card">
+        <div class="counter-number">{{ device_status.current_count_basic }}</div>
+        <div class="counter-label">Basic</div>
+      </div>
+      <div class="counter-card">
+        <div class="counter-number">{{ device_status.current_count_standard }}</div>
+        <div class="counter-label">Standard</div>
+      </div>
+      <div class="counter-card">
+        <div class="counter-number">{{ device_status.current_count_premium }}</div>
+        <div class="counter-label">Premium</div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  
+  <!-- Machine Assignment -->
+  {% if device.machine %}
+  <div class="info-section">
+    <h3>Machine Assignment</h3>
+    <div class="info-row">
+      <span class="info-label">Machine:</span>
+      <span class="info-value">{{ device.machine.name }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Machine ID:</span>
+      <span class="info-value">{{ device.machine.machine_id }}</span>
+    </div>
+    {% if device.machine.outlet %}
+    <div class="info-row">
+      <span class="info-label">Outlet:</span>
+      <span class="info-value">{{ device.machine.outlet.outlet_name }}</span>
+    </div>
+    {% endif %}
+    <div class="info-row">
+      <span class="info-label">Installed At:</span>
+      <span class="info-value">{{ device.machine.installed_at|date:"M d, Y H:i" }}</span>
+    </div>
+    
+    <div style="margin-top:1rem;">
+      <form method="POST" action="/devices/{{ device.device_id }}/unassign/" style="display:inline;">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-danger">Unassign from Machine</button>
+      </form>
+    </div>
+  </div>
+  {% else %}
+  <div class="info-section">
+    <h3>Machine Assignment</h3>
+    <p>This device is not assigned to any machine.</p>
+    <a href="/devices/" class="btn btn-primary">Assign to Machine</a>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Usage Statistics -->
+{% if usage_stats %}
+<div class="info-section">
+  <h3>Usage Statistics (Last 30 Days)</h3>
+  <div class="usage-stats">
+    {% for stat in usage_stats %}
+    <div class="usage-item">
+      <span class="info-label">{{ stat.event_type }} Treatments:</span>
+      <span class="info-value">{{ stat.count }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Recent Events -->
+<div class="info-section">
+  <h3>Recent Events</h3>
+  {% if recent_events %}
+  <div class="table-container">
+    <div class="table-scrollable">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>No.</th>
+            <th>Time</th>
+            <th>Event Type</th>
+            <th>Treatment</th>
+            <th>Counter</th>
+            <th>Device Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for event in recent_events %}
+          <tr>
+            <td>{{ forloop.counter }}</td>
+            <td>{{ event.occurred_at|date:"M d, Y H:i:s" }}</td>
+            <td>
+              <span class="treatment-badge treatment-{{ event.event_type|lower }}">
+                {{ event.event_type }}
+              </span>
+            </td>
+            <td>{{ event.treatment|default:"-" }}</td>
+            <td>{{ event.counter|default:"-" }}</td>
+            <td>{{ event.device_timestamp|default:"-" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <p>No events recorded for this device.</p>
+  {% endif %}
+</div>
+
+<div style="margin-top:2rem; display: flex; gap: 1rem;">
+  <a href="/devices/{{ device.device_id }}/commands/" class="btn btn-primary">Manage Commands</a>
+  <a href="/devices/" class="btn btn-secondary">Back to Devices</a>
+</div>
+{% endblock %}

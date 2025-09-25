@@ -1,0 +1,131 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Outlets - Ozone Machine Management{% endblock %}
+
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0;">
+  <h1 style="margin:0;">Outlets</h1>
+  <a href="/outlets/create/" class="btn btn-primary">Create Outlet</a>
+</div>
+
+<!-- Statistics -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="stat-number">{{ total_outlets }}</div>
+    <div class="stat-label">Total Outlets</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ outlets_with_machines }}</div>
+    <div class="stat-label">With Machines</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ total_machines_in_outlets }}</div>
+    <div class="stat-label">Total Machines</div>
+  </div>
+  <div class="stat-card stat-accent">
+    <div style="font-weight:700;color:#1e40af;text-align:center">Total Treatments</div>
+    <div class="stat-number" style="color:#1e40af">{{ agg_total }}</div>
+    <div class="stat-sub" style="display:flex;gap:1rem;justify-content:center;color:#475569;font-size:0.85rem">
+      <span>Basic: {{ agg_basic }}</span>
+      <span>Standard: {{ agg_standard }}</span>
+      <span>Premium: {{ agg_premium }}</span>
+    </div>
+  </div>
+</div>
+
+{% include 'outlets/_list.html' %}
+{% endblock %}
+
+{% block extra_js %}
+// OUTLETS TABLE UPDATE SYSTEM
+console.log('🔥 OUTLETS PAGE LOADED');
+
+function updateOutletsTable() {
+  console.log('🔄 Updating outlets table...');
+  
+  fetch('/api/devices/')
+    .then(response => response.json())
+    .then(data => {
+      console.log('📡 Devices API Response:', data);
+      
+      const tbody = document.querySelector('#outlets-table tbody');
+      if (!tbody) {
+        console.error('❌ Outlets table not found!');
+        return;
+      }
+      
+      // Get outlets from Django template
+      const outlets = JSON.parse('{{ outlets_json|escapejs }}');
+      console.log('📋 Outlets:', outlets);
+      
+      // Build device status map for counter calculations
+      const deviceStatusMap = {};
+      data.devices.forEach(device => {
+        if (device.bound_machine) {
+          deviceStatusMap[device.bound_machine.id] = device.counts;
+        }
+      });
+      
+      // Clear table
+      tbody.innerHTML = '';
+      
+      if (outlets.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="9" style="text-align:center;padding:2rem;color:#64748b">
+              No outlets yet
+            </td>
+          </tr>
+        `;
+        return;
+      }
+      
+      // Rebuild table
+      outlets.forEach((outlet, index) => {
+        // Calculate counters for this outlet's machines
+        let basicCount = 0;
+        let standardCount = 0;
+        let premiumCount = 0;
+        
+        // This is a simplified calculation - in a real implementation,
+        // you'd need to map machines to outlets and then to devices
+        // For now, we'll use the outlet's calculated values
+        basicCount = outlet.treat_basic;
+        standardCount = outlet.treat_standard;
+        premiumCount = outlet.treat_premium;
+        
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td class="col-sep">${index + 1}</td>
+          <td>${outlet.outlet_name}</td>
+          <td>${outlet.region}</td>
+          <td>${outlet.machine_count}</td>
+          <td style="border-left:1px solid #e5e7eb;">${basicCount}</td>
+          <td>${standardCount}</td>
+          <td class="col-premium">${premiumCount}</td>
+          <td>${outlet.treat_total}</td>
+          <td>
+            <a href="/outlets/${outlet.id}/manage/" class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Manage</a>
+          </td>
+        `;
+        tbody.appendChild(row);
+      });
+      
+      console.log('✅ Outlets table updated');
+    })
+    .catch(error => {
+      console.error('❌ Outlets update error:', error);
+    });
+}
+
+// Update table immediately on page load
+console.log('🚀 Updating outlets table immediately...');
+updateOutletsTable();
+
+// Start auto-refresh every 1 second
+console.log('🚀 Starting outlets auto-refresh...');
+setInterval(updateOutletsTable, 1000);
+
+// Manual refresh function
+window.refreshOutlets = updateOutletsTable;
+{% endblock %}

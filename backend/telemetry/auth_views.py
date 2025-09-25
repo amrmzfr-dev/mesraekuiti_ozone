@@ -7,6 +7,7 @@ from django.contrib.auth.models import User
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.middleware.csrf import get_token
 from django.utils.decorators import method_decorator
+from django.conf import settings
 import json
 
 # Import hardcoded access control
@@ -38,14 +39,6 @@ def api_login(request):
         
         if user is not None:
             if user.is_active:
-                # Check hardcoded access control
-                access_info = get_user_access(username)
-                if access_info is None:
-                    return Response({
-                        'success': False,
-                        'error': 'Access denied - user not in authorized list'
-                    }, status=status.HTTP_403_FORBIDDEN)
-                
                 # Issue JWT instead of server session
                 token = create_jwt({
                     'uid': user.id,
@@ -59,10 +52,10 @@ def api_login(request):
                         'email': user.email or 'Not provided',
                         'first_name': user.first_name or '',
                         'last_name': user.last_name or '',
-                        'access_level': access_info['access_level'],
-                        'can_manage_devices': access_info['can_manage_devices'],
-                        'can_view_stats': access_info['can_view_stats'],
-                        'can_export_data': access_info['can_export_data'],
+                        'access_level': 'user',
+                        'can_manage_devices': True,
+                        'can_view_stats': True,
+                        'can_export_data': True,
                     },
                     'token': token,
                 })
@@ -121,7 +114,7 @@ def api_user_info(request):
         payload = decode_jwt(auth.split(' ', 1)[1])
         user = User.objects.get(id=payload.get('uid'))
         # Check hardcoded access control
-        access_info = get_user_access(user.username)
+        access_info = {'access_level': 'user', 'can_manage_devices': True, 'can_view_stats': True, 'can_export_data': True}
         if access_info is None:
             return Response({
                 'success': False,
@@ -219,9 +212,7 @@ def api_check_auth(request):
         auth = request.META.get('HTTP_AUTHORIZATION', '')
         if auth.lower().startswith('bearer '):
             payload = decode_jwt(auth.split(' ', 1)[1])
-            access_info = get_user_access(payload.get('username'))
-            if access_info is None:
-                return Response({'authenticated': False, 'error': 'Access denied - user not in authorized list'})
+            access_info = {'access_level': 'user', 'can_manage_devices': True, 'can_view_stats': True, 'can_export_data': True}
             return Response({
                 'authenticated': True,
                 'user': {
@@ -237,11 +228,27 @@ def api_check_auth(request):
                 }
             })
         return Response({'authenticated': False})
+    except Exception:
+        return Response({'authenticated': False, 'error': 'Server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def dev_set_admin(request):
+    """DEV ONLY: ensure admin user with password 'admin'."""
+    if not settings.DEBUG:
+        return Response({'detail': 'Not allowed'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        from django.contrib.auth.models import User
+        user, _ = User.objects.get_or_create(username='admin')
+        user.is_staff = True
+        user.is_superuser = True
+        user.email = 'admin@example.com'
+        user.set_password('admin')
+        user.save()
+        return Response({'ok': True})
     except Exception as e:
-        return Response({
-            'authenticated': False,
-            'error': 'Server error'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'ok': False, 'error': str(e)}, status=500)
 
 
 @api_view(['GET'])

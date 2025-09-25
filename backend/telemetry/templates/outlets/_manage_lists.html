@@ -1,0 +1,40 @@
+<div class="grid">
+  <div>
+    <h3>Machines in this Outlet</h3>
+    <div class="table-container">
+      <div class="table-scrollable-outlets">
+        <table class="table">
+          <thead><tr><th>No.</th><th>Machine ID</th><th>Name</th><th>Device</th></tr></thead>
+          <tbody>
+            {% for m in machines %}
+            <tr>
+              <td>{{ forloop.counter }}</td>
+              <td>{{ m.machine_id }}</td>
+              <td>{{ m.name }}</td>
+              <td>{{ m.device.device_id|default:'-' }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="4">No machines assigned</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div>
+    <h3>Assign Unassigned Machine</h3>
+    <form action="/outlets/{{ outlet.outlet_id }}/assign/" method="post">
+      {% csrf_token %}
+      <label>Machine</label>
+      <select name="machine_id" required style="width:100%">
+        <option value="" selected>Choose machine...</option>
+        {% for m in unassigned %}
+          <option value="{{ m.machine_id }}">{{ m.machine_id }} - {{ m.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" style="margin-top:.5rem">Assign to {{ outlet.outlet_name }}</button>
+    </form>
+  </div>
+</div>
+
+

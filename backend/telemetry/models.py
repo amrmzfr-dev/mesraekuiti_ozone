@@ -1,207 +1,271 @@
 from django.db import models
+from django.utils import timezone
+from django.contrib.auth.models import AbstractUser
 
-class Device(models.Model):
-    """Registered hardware device (ESP32)."""
-    mac = models.CharField(max_length=32, unique=True, db_index=True)
-    device_id = models.CharField(max_length=128, unique=True, db_index=True)
-    token = models.CharField(max_length=128, unique=True)  # bearer token for auth
-    assigned = models.BooleanField(default=False)
-    firmware = models.CharField(max_length=50, null=True, blank=True)
-    last_seen = models.DateTimeField(null=True, blank=True)
-    notes = models.TextField(null=True, blank=True)
+
+class User(AbstractUser):
+    ROLE_ADMIN = 'admin'
+    ROLE_P2 = 'p2'
+    ROLE_DMM = 'dmm'
+    ROLE_DEALER = 'dealer'
+    ROLE_CHOICES = [
+        (ROLE_ADMIN, 'Admin'),
+        (ROLE_P2, 'P2 (Perodua HQ)'),
+        (ROLE_DMM, 'DMM (Perodua Dealer)'),
+        (ROLE_DEALER, 'Dealer (Non-Perodua)'),
+    ]
+
+    role = models.CharField(max_length=16, choices=ROLE_CHOICES, default=ROLE_DEALER)
+
+    def __str__(self):
+        return f"{self.username} ({self.get_role_display()})"
+
+
+class Outlet(models.Model):
+    # Primary key as requested: outlet_id auto by the system
+    outlet_id = models.AutoField(primary_key=True)
+
+    # Business fields
+    outlet_name = models.CharField(max_length=200)
+    region = models.CharField(
+        max_length=32,
+        blank=True,
+        null=True,
+        help_text="Geographical region for reporting"
+    )
+    pic_sm = models.CharField(max_length=100, blank=True, null=True, help_text="Person in charge (SM)")
+    sm_number = models.CharField(max_length=30, blank=True, null=True, help_text="SM phone number")
+    total_sva = models.IntegerField(default=0, help_text="Total Service Advisors")
+    avg_intake_service = models.IntegerField(default=0)
+    num_machines = models.IntegerField(default=0, help_text="Number of machines at this outlet")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-last_seen", "device_id"]
+        ordering = ["outlet_name"]
 
     def __str__(self) -> str:
+        return f"{self.outlet_name} (#{self.outlet_id})"
+
+
+class Device(models.Model):
+    mac = models.CharField(max_length=17, unique=True, help_text="MAC address of the ESP32 device", default="00:00:00:00:00:00")
+    device_id = models.CharField(max_length=100, unique=True, help_text="Unique device identifier")
+    firmware = models.CharField(max_length=50, blank=True, null=True, help_text="Firmware version")
+    token = models.CharField(max_length=128, blank=True, null=True, help_text="Authentication token")
+    assigned = models.BooleanField(default=False, help_text="Whether device is assigned to a machine")
+    last_seen = models.DateTimeField(blank=True, null=True, help_text="Last time device was seen online")
+    notes = models.TextField(blank=True, null=True, help_text="Additional notes about the device")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-last_seen', 'device_id']
+
+    def __str__(self):
         return f"{self.device_id} ({self.mac})"
 
 
-class TelemetryEvent(models.Model):
-    EVENT_BASIC = "BASIC"
-    EVENT_STANDARD = "STANDARD"
-    EVENT_PREMIUM = "PREMIUM"
-    EVENT_STATUS = "status"
-    EVENT_CHOICES = [
-        (EVENT_BASIC, "BASIC"),
-        (EVENT_STANDARD, "STANDARD"),
-        (EVENT_PREMIUM, "PREMIUM"),
-        (EVENT_STATUS, "Status Update"),
-    ]
+class Machine(models.Model):
+    # Custom AutoField primary key, to mirror Outlet.outlet_id naming
+    machine_id = models.AutoField(primary_key=True)
+    machine_code = models.CharField(max_length=255)
 
-    device_id = models.CharField(max_length=128, db_index=True)
-    # Legacy fields (kept for compatibility)
-    event_type = models.CharField(max_length=16, choices=EVENT_CHOICES)
-    count_basic = models.IntegerField(null=True, blank=True)
-    count_standard = models.IntegerField(null=True, blank=True)
-    count_premium = models.IntegerField(null=True, blank=True)
-    occurred_at = models.DateTimeField(db_index=True)
-    device_timestamp = models.CharField(max_length=25, null=True, blank=True, help_text="Timestamp from ESP32 device")
-    wifi_status = models.BooleanField(null=True, blank=True, help_text="WiFi connection status")
-    payload = models.JSONField(null=True, blank=True)
+    outlet = models.ForeignKey(
+        Outlet,
+        related_name='machines',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True
+    )
 
-    # New fields for current firmware protocol (idempotent ingest)
-    event_id = models.CharField(max_length=128, unique=True, null=True, blank=True, db_index=True)
-    event = models.CharField(max_length=32, null=True, blank=True, help_text="e.g., 'treatment'")
-    treatment = models.CharField(max_length=16, null=True, blank=True, help_text="BASIC|STANDARD|PREMIUM")
-    counter = models.IntegerField(null=True, blank=True, help_text="Counter value at press time")
+    device = models.OneToOneField(
+        Device,
+        related_name='machine',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        help_text="Only one device (ESP32) can be bound at a time"
+    )
 
-    class Meta:
-        ordering = ["-occurred_at", "-id"]
+    installed_at = models.DateTimeField(default=timezone.now)
+    is_active = models.BooleanField(default=True)
 
-    def __str__(self) -> str:
-        return f"{self.device_id} {self.event or self.event_type} @ {self.occurred_at.isoformat()}"
+    @property
+    def name(self) -> str:
+        # Backward-compatible alias used by older code/templates
+        return self.machine_code
+
+    def __str__(self):
+        outlet_name = self.outlet.outlet_name if self.outlet else "No outlet"
+        return f"{self.machine_code} - {outlet_name}"
 
 
 class DeviceStatus(models.Model):
-    """Track current status of each device"""
-    device_id = models.CharField(max_length=128, unique=True, db_index=True)
-    last_seen = models.DateTimeField(auto_now=True)
+    """Real-time status of ESP32 devices"""
+    device_id = models.CharField(max_length=100, unique=True)
     wifi_connected = models.BooleanField(default=False)
     rtc_available = models.BooleanField(default=False)
     sd_card_available = models.BooleanField(default=False)
     current_count_basic = models.IntegerField(default=0)
     current_count_standard = models.IntegerField(default=0)
     current_count_premium = models.IntegerField(default=0)
-    uptime_seconds = models.IntegerField(null=True, blank=True)
-    device_timestamp = models.CharField(max_length=25, null=True, blank=True)
-    
+    uptime_seconds = models.IntegerField(default=0)
+    device_timestamp = models.CharField(max_length=50, blank=True, null=True)
+    last_seen = models.DateTimeField(auto_now=True)
+    last_poll = models.DateTimeField(null=True, blank=True, help_text="Last time ESP32 polled for commands")
+
     class Meta:
-        ordering = ["-last_seen"]
-    
-    def __str__(self) -> str:
-        return f"{self.device_id} - Last seen: {self.last_seen}"
-    
+        ordering = ['-last_seen']
+
+    def __str__(self):
+        return f"Status: {self.device_id}"
+
     def get_accumulated_basic_count(self):
-        """Get accumulated basic count from database events"""
-        from django.db.models import Count
+        """Get accumulated basic treatment count from events"""
         return TelemetryEvent.objects.filter(
             device_id=self.device_id,
             event_type='BASIC'
         ).count()
-    
+
     def get_accumulated_standard_count(self):
-        """Get accumulated standard count from database events"""
-        from django.db.models import Count
+        """Get accumulated standard treatment count from events"""
         return TelemetryEvent.objects.filter(
             device_id=self.device_id,
             event_type='STANDARD'
         ).count()
-    
+
     def get_accumulated_premium_count(self):
-        """Get accumulated premium count from database events"""
-        from django.db.models import Count
+        """Get accumulated premium treatment count from events"""
         return TelemetryEvent.objects.filter(
             device_id=self.device_id,
             event_type='PREMIUM'
         ).count()
-    
-    def update_accumulated_counts(self):
-        """Update the current counts with accumulated values from database"""
-        self.current_count_basic = self.get_accumulated_basic_count()
-        self.current_count_standard = self.get_accumulated_standard_count()
-        self.current_count_premium = self.get_accumulated_premium_count()
-        self.save()
+
+
+class TelemetryEvent(models.Model):
+    """Individual treatment events from ESP32 devices"""
+    EVENT_CHOICES = [
+        ('BASIC', 'Basic Treatment'),
+        ('STANDARD', 'Standard Treatment'),
+        ('PREMIUM', 'Premium Treatment'),
+        ('status', 'Status Update'),
+    ]
+
+    device_id = models.CharField(max_length=100)
+    event_id = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    event = models.CharField(max_length=50, default='treatment')
+    treatment = models.CharField(max_length=20, blank=True, null=True)
+    counter = models.IntegerField(blank=True, null=True)
+    event_type = models.CharField(max_length=20, choices=EVENT_CHOICES, default='status')
+    count_basic = models.IntegerField(blank=True, null=True)
+    count_standard = models.IntegerField(blank=True, null=True)
+    count_premium = models.IntegerField(blank=True, null=True)
+    occurred_at = models.DateTimeField(auto_now_add=True)
+    device_timestamp = models.CharField(max_length=50, blank=True, null=True)
+    wifi_status = models.BooleanField(default=True)
+    payload = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-occurred_at']
+
+    def __str__(self):
+        return f"{self.device_id}: {self.event_type} at {self.occurred_at}"
 
 
 class UsageStatistics(models.Model):
-    """Daily usage statistics for analytics"""
-    device_id = models.CharField(max_length=128, db_index=True)
-    date = models.DateField(db_index=True)
+    """Daily usage statistics aggregated by device and outlet"""
+    device_id = models.CharField(max_length=100)
+    outlet_id = models.ForeignKey(Outlet, on_delete=models.CASCADE, null=True, blank=True)
+    date = models.DateField()
     basic_count = models.IntegerField(default=0)
     standard_count = models.IntegerField(default=0)
     premium_count = models.IntegerField(default=0)
-    total_events = models.IntegerField(default=0)
-    first_event = models.DateTimeField(null=True, blank=True)
-    last_event = models.DateTimeField(null=True, blank=True)
-    
+    total_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
     class Meta:
         unique_together = ['device_id', 'date']
-        ordering = ["-date", "-device_id"]
+        ordering = ['-date', 'device_id']
 
-    def __str__(self) -> str:
-        return f"{self.device_id} - {self.date}: {self.total_events} events"
+    def __str__(self):
+        return f"{self.device_id} - {self.date}: {self.total_count} treatments"
 
 
-class Outlet(models.Model):
-    """Outlet/Location where machines are installed"""
-    name = models.CharField(max_length=200, unique=True)
-    location = models.CharField(max_length=300, null=True, blank=True)
-    address = models.TextField(null=True, blank=True)
-    contact_person = models.CharField(max_length=100, null=True, blank=True)
-    contact_phone = models.CharField(max_length=20, null=True, blank=True)
-    # Additional owner-maintained metrics (optional)
-    total_sva = models.IntegerField(null=True, blank=True, help_text="Total Service Advisors")
-    average_intage_services = models.IntegerField(null=True, blank=True, help_text="Average intage services")
-    number_of_machines = models.IntegerField(null=True, blank=True, help_text="Number of machines at outlet")
-    is_active = models.BooleanField(default=True)
+class Command(models.Model):
+    """Commands sent from backend to ESP32 devices"""
+    
+    COMMAND_TYPES = [
+        ('RESET_COUNTERS', 'Reset Counters'),
+        ('CLEAR_MEMORY', 'Clear Memory'),
+        ('CLEAR_QUEUE', 'Clear Queue'),
+        ('REBOOT_DEVICE', 'Reboot Device'),
+        ('UPDATE_SETTINGS', 'Update Settings'),
+        ('GET_STATUS', 'Get Status'),
+        ('SYNC_TIME', 'Sync Time'),
+        ('UPDATE_FIRMWARE', 'Update Firmware'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('sent', 'Sent'),
+        ('executed', 'Executed'),
+        ('failed', 'Failed'),
+        ('timeout', 'Timeout'),
+    ]
+    
+    PRIORITY_CHOICES = [
+        ('low', 'Low'),
+        ('normal', 'Normal'),
+        ('high', 'High'),
+        ('critical', 'Critical'),
+    ]
+    
+    # Command identification
+    command_id = models.CharField(max_length=100, unique=True, help_text="Unique command identifier")
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='commands')
+    command_type = models.CharField(max_length=20, choices=COMMAND_TYPES)
+    priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='normal')
+    
+    # Command data
+    payload = models.JSONField(default=dict, blank=True, help_text="Command parameters/data")
+    description = models.TextField(blank=True, help_text="Human-readable description")
+    
+    # Status tracking
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    executed_at = models.DateTimeField(null=True, blank=True)
+    
+    # Response tracking
+    response_data = models.JSONField(default=dict, blank=True, help_text="ESP32 response data")
+    error_message = models.TextField(blank=True, help_text="Error message if failed")
+    retry_count = models.IntegerField(default=0, help_text="Number of retry attempts")
+    
+    # Metadata
+    created_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True, help_text="Command expiration time")
     
     class Meta:
-        ordering = ["name"]
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['device', 'status']),
+            models.Index(fields=['status', 'priority']),
+            models.Index(fields=['created_at']),
+        ]
     
-    def __str__(self) -> str:
-        return f"{self.name} ({self.location or 'No location'})"
+    def __str__(self):
+        return f"{self.command_type} for {self.device.device_id} ({self.status})"
+    
+    def is_expired(self):
+        """Check if command has expired"""
+        if self.expires_at:
+            return timezone.now() > self.expires_at
+        return False
+    
+    def can_retry(self, max_retries=3):
+        """Check if command can be retried"""
+        return self.retry_count < max_retries and self.status in ['failed', 'timeout']
 
 
-class Machine(models.Model):
-    """Machine registered to an outlet - can have multiple devices over time"""
-    outlet = models.ForeignKey(Outlet, on_delete=models.CASCADE, related_name='machines', null=True, blank=True)
-    name = models.CharField(max_length=200, null=True, blank=True)
-    machine_type = models.CharField(max_length=50, default='Ozone Generator')
-    is_active = models.BooleanField(default=True)
-    installed_date = models.DateField(null=True, blank=True)
-    last_maintenance = models.DateField(null=True, blank=True)
-    notes = models.TextField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
-    class Meta:
-        ordering = ["outlet__name", "name"]
-    
-    def __str__(self) -> str:
-        outlet_name = self.outlet.name if self.outlet else 'No outlet'
-        return f"{self.name or f'Machine-{self.id}'} @ {outlet_name}"
-    
-    @property
-    def current_device(self):
-        """Get the currently active device for this machine"""
-        return self.devices.filter(is_active=True).first()
-    
-    @property
-    def current_device_id(self):
-        """Get the device_id of the currently active device"""
-        current = self.current_device
-        return current.device_id if current else None
-
-
-class MachineDevice(models.Model):
-    """ESP32 assigned to a machine. Exactly one can be active at a time.
-
-    History is preserved by marking previous bindings inactive with a
-    timestamp in `deactivated_date`. This allows a machine to show all
-    previously connected ESP32 identifiers while enforcing a single
-    active binding currently.
-    """
-    machine = models.ForeignKey(Machine, on_delete=models.CASCADE, related_name='devices')
-    device_id = models.CharField(max_length=128, db_index=True)
-    is_active = models.BooleanField(default=True)
-    assigned_date = models.DateTimeField(auto_now_add=True)
-    deactivated_date = models.DateTimeField(null=True, blank=True)
-    notes = models.TextField(null=True, blank=True)
-    
-    class Meta:
-        ordering = ["-is_active", "-assigned_date"]
-        unique_together = ['machine', 'device_id']  # Same device can't be assigned to same machine twice
-    
-    def __str__(self) -> str:
-        status = "Active" if self.is_active else "Inactive"
-        return f"{self.device_id} ({status}) - {self.machine.name}"
-    
-    def deactivate(self):
-        """Deactivate this device"""
-        from django.utils import timezone
-        self.is_active = False
-        self.deactivated_date = timezone.now()
-        self.save()

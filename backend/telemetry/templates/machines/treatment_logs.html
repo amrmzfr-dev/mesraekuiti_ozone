@@ -1,0 +1,386 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Treatment Logs - {{ machine.name }} - Ozone Machine Management{% endblock %}
+
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+  <div>
+    <h1 style="margin:0;">Treatment Logs</h1>
+    <p style="margin:0.5rem 0 0 0; color:#64748b;">
+      Machine: <strong>{{ machine.name }}</strong>
+      {% if device %}
+        | Device: <strong>{{ device.device_id }}</strong>
+      {% else %}
+        | <span style="color:#ef4444;">No Device Assigned</span>
+      {% endif %}
+      | Outlet: <strong>{% if machine.outlet %}{{ machine.outlet.outlet_name }}{% else %}<span style="color:#ef4444;">Unassigned</span>{% endif %}</strong>
+    </p>
+  </div>
+  <div style="display:flex; gap:0.5rem;">
+    <a href="/machines/" class="btn btn-secondary">Back to Machines</a>
+    {% if device %}
+      <a href="/devices/{{ device.device_id }}/" class="btn btn-primary">View Device</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if device %}
+<!-- Unified Stats Card -->
+<div class="card" style="margin-bottom:1rem;">
+  <div class="card-header">
+    <h3 style="margin:0;">Machine Stats</h3>
+  </div>
+  <div class="card-body">
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:1rem;">
+      <div>
+        <div style="font-weight:700; margin-bottom:0.25rem; color:#334155;">Historical (All-Time)</div>
+        <div>Total: <strong>{{ stats.total_treatments }}</strong></div>
+        <div>Basic: <strong>{{ stats.basic_treatments }}</strong></div>
+        <div>Standard: <strong>{{ stats.standard_treatments }}</strong></div>
+        <div>Premium: <strong>{{ stats.premium_treatments }}</strong></div>
+      </div>
+      <div>
+        <div style="font-weight:700; margin-bottom:0.25rem; color:#334155;">Current (Live Counters)</div>
+        <div>Total: <strong>{{ stats.current_total }}</strong></div>
+        <div>Basic: <strong>{{ stats.current_basic }}</strong></div>
+        <div>Standard: <strong>{{ stats.current_standard }}</strong></div>
+        <div>Premium: <strong>{{ stats.current_premium }}</strong></div>
+      </div>
+      <div>
+        <div style="font-weight:700; margin-bottom:0.25rem; color:#334155;">Commands</div>
+        <div>Reset Commands: <strong>{{ stats.total_resets }}</strong></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Current Device Status card removed as requested -->
+
+<!-- Treatment Logs Table -->
+<div class="table-container">
+  <div class="table-scrollable">
+    <table id="treatment-logs-table" class="table">
+      <thead>
+        <tr>
+          <th class="col-sep">No.</th>
+          <th>Event/Command ID</th>
+          <th>Type</th>
+          <th>Basic</th>
+          <th>Standard</th>
+          <th>Premium</th>
+          <th>Device Timestamp</th>
+          <th>Server Time</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="logs-tbody">
+        <!-- Content will be loaded dynamically -->
+        <tr>
+          <td colspan="8" style="text-align:center;padding:2rem;color:#64748b">
+            Loading logs...
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Log Details Modal -->
+<div id="logDetailsModal" class="modal" style="display:none;">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>Treatment Log Details</h3>
+      <span class="close" onclick="closeLogDetails()">&times;</span>
+    </div>
+    <div class="modal-body">
+      <div id="logDetailsContent">
+        <!-- Details will be loaded here -->
+      </div>
+    </div>
+  </div>
+</div>
+
+{% else %}
+<!-- No Device Assigned -->
+<div class="card">
+  <div class="card-body" style="text-align:center; padding:3rem;">
+    <h3 style="color:#64748b; margin-bottom:1rem;">No Device Assigned</h3>
+    <p style="color:#64748b; margin-bottom:2rem;">
+      This machine doesn't have a device assigned yet. Assign a device to start tracking treatment logs.
+    </p>
+    <a href="/machines/" class="btn btn-primary">Back to Machines</a>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+// TREATMENT LOGS PAGE
+console.log('🔥 TREATMENT LOGS PAGE LOADED');
+
+// Store current scroll position
+let currentScrollPosition = 0;
+
+function updateTreatmentLogs() {
+  console.log('🔄 Updating treatment logs...');
+  
+  // Store current scroll position
+  currentScrollPosition = window.pageYOffset || document.documentElement.scrollTop;
+  
+  fetch(`/api/machines/${encodeURIComponent('{{ machine.machine_id }}')}/logs/`)
+    .then(response => response.json())
+    .then(data => {
+      console.log('📡 Machine Logs API Response:', data);
+      
+      const tbody = document.getElementById('logs-tbody');
+      if (!tbody) {
+        console.error('❌ Logs table not found!');
+        return;
+      }
+      
+      // Get treatment logs from Django template
+      const treatmentLogs = data.treatment_logs || [];
+      const resetCommands = data.reset_commands || [];
+      
+      console.log('📋 Treatment Logs:', treatmentLogs);
+      console.log('🔄 Reset Commands:', resetCommands);
+      
+      // Combine and sort all logs by time
+      const allLogs = [];
+      
+      // Add treatment events
+      treatmentLogs.forEach(log => {
+        allLogs.push({
+          type: 'treatment',
+          id: log.id,
+          eventId: log.event_id,
+          treatment: log.treatment,
+          counter: log.counter,
+          counters: log.counters || { basic: 0, standard: 0, premium: 0 },
+          deviceTimestamp: log.device_timestamp,
+          serverTime: log.occurred_at,
+          wifiStatus: log.wifi_status,
+          payload: log.payload
+        });
+      });
+      
+      // Add reset commands
+      resetCommands.forEach(cmd => {
+        allLogs.push({
+          type: 'reset',
+          id: cmd.id,
+          eventId: cmd.command_id,
+          treatment: 'RESET',
+          counter: '0',
+          counters: cmd.counters || { basic: 0, standard: 0, premium: 0 },
+          deviceTimestamp: cmd.executed_at ? cmd.executed_at : cmd.created_at,
+          serverTime: cmd.created_at,
+          wifiStatus: true,
+          payload: cmd.response_data,
+          status: cmd.status,
+          executedAt: cmd.executed_at
+        });
+      });
+      
+      // Compute per-entry cumulative counters in chronological order
+      const logsChrono = [...allLogs].sort((a, b) => new Date(a.serverTime) - new Date(b.serverTime));
+      let runningBasic = 0, runningStandard = 0, runningPremium = 0;
+      logsChrono.forEach(item => {
+        // Prefer explicit counters from payload for treatments
+        if (item.type === 'treatment') {
+          const payloadCounters = (item.payload && item.payload.current_counters) ? item.payload.current_counters : null;
+          if (payloadCounters) {
+            runningBasic = parseInt(payloadCounters.basic ?? runningBasic) || 0;
+            runningStandard = parseInt(payloadCounters.standard ?? runningStandard) || 0;
+            runningPremium = parseInt(payloadCounters.premium ?? runningPremium) || 0;
+          } else if (item.treatment && item.counter != null) {
+            // Set the specific treatment counter to the provided value, keep others
+            const val = parseInt(item.counter) || 0;
+            if (item.treatment === 'BASIC') runningBasic = val;
+            if (item.treatment === 'STANDARD') runningStandard = val;
+            if (item.treatment === 'PREMIUM') runningPremium = val;
+          }
+        } else if (item.type === 'reset') {
+          // Use counters from reset response if present, else zero
+          const resetCounters = item.counters || (item.payload && item.payload.current_counters) || { basic: 0, standard: 0, premium: 0 };
+          runningBasic = parseInt(resetCounters.basic ?? 0) || 0;
+          runningStandard = parseInt(resetCounters.standard ?? 0) || 0;
+          runningPremium = parseInt(resetCounters.premium ?? 0) || 0;
+        }
+        // Attach computed counters to the item
+        item.computedCounters = { basic: runningBasic, standard: runningStandard, premium: runningPremium };
+      });
+
+      // Now sort for display by newest first
+      allLogs.sort((a, b) => new Date(b.serverTime) - new Date(a.serverTime));
+      
+      // Clear table
+      tbody.innerHTML = '';
+      
+      if (allLogs.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="8" style="text-align:center;padding:2rem;color:#64748b">
+              No logs found for this device
+            </td>
+          </tr>
+        `;
+        return;
+      }
+      
+      // Rebuild table
+      allLogs.forEach((log, index) => {
+        const row = document.createElement('tr');
+        
+        // Determine badge color and text
+        let badgeClass = 'status-loading';
+        let badgeText = 'Unknown';
+        
+        if (log.type === 'treatment') {
+          switch(log.treatment) {
+            case 'BASIC':
+              badgeClass = 'status-online';
+              badgeText = 'BASIC';
+              break;
+            case 'STANDARD':
+              badgeClass = 'status-idle';
+              badgeText = 'STANDARD';
+              break;
+            case 'PREMIUM':
+              badgeClass = 'status-offline';
+              badgeText = 'PREMIUM';
+              break;
+          }
+        } else if (log.type === 'reset') {
+          badgeClass = 'status-assigned';
+          badgeText = 'RESET';
+        }
+        
+        // Format timestamps
+        const serverTime = new Date(log.serverTime).toLocaleString();
+        const deviceTimestamp = log.deviceTimestamp || 'N/A';
+        
+        row.innerHTML = `
+          <td class="col-sep">${index + 1}</td>
+          <td>
+            <code style="font-size:0.8rem;">${log.eventId || 'N/A'}</code>
+          </td>
+          <td>
+            <span class="status-badge ${badgeClass}">${badgeText}</span>
+          </td>
+          <td><strong>${(log.computedCounters?.basic ?? log.counters?.basic ?? 0)}</strong></td>
+          <td><strong>${(log.computedCounters?.standard ?? log.counters?.standard ?? 0)}</strong></td>
+          <td><strong>${(log.computedCounters?.premium ?? log.counters?.premium ?? 0)}</strong></td>
+          <td>
+            <code style="font-size:0.8rem;">${deviceTimestamp}</code>
+          </td>
+          <td>${serverTime}</td>
+          <td>
+            ${log.type === 'reset' ? 
+              `<span class="status-badge ${log.status === 'executed' ? 'status-online' : 'status-offline'}">${log.status || 'pending'}</span>` :
+              (log.wifiStatus ? 
+                '<span class="status-badge status-online">Connected</span>' : 
+                '<span class="status-badge status-offline">Disconnected</span>')
+            }
+          </td>
+          <td>
+            <button onclick="showLogDetails('${log.id}', '${log.type}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Details</button>
+          </td>
+        `;
+        tbody.appendChild(row);
+      });
+      
+      // Restore scroll position
+      window.scrollTo(0, currentScrollPosition);
+      
+      console.log('✅ Treatment logs updated');
+    })
+    .catch(error => {
+      console.error('❌ Treatment logs update error:', error);
+    });
+}
+
+function showLogDetails(logId, logType) {
+  console.log('📋 Showing log details for:', logId, 'Type:', logType);
+  
+  // Find the log data from the table
+  const table = document.getElementById('treatment-logs-table');
+  const rows = table.querySelectorAll('tbody tr');
+  
+  let logData = null;
+  rows.forEach(row => {
+    const detailsButton = row.querySelector('button[onclick*="' + logId + '"]');
+    if (detailsButton) {
+      const cells = row.querySelectorAll('td');
+      logData = {
+        eventId: cells[1].textContent.trim(),
+        type: cells[2].textContent.trim(),
+        counter: cells[3].textContent.trim(),
+        deviceTimestamp: cells[4].textContent.trim(),
+        serverTime: cells[5].textContent.trim(),
+        status: cells[6].textContent.trim()
+      };
+    }
+  });
+  
+  if (logData) {
+    const modal = document.getElementById('logDetailsModal');
+    const content = document.getElementById('logDetailsContent');
+    
+    content.innerHTML = `
+      <div style="display:grid; gap:1rem;">
+        <div>
+          <strong>Event/Command ID:</strong><br>
+          <code style="font-size:0.9rem; background:#f1f5f9; padding:0.5rem; border-radius:4px; display:block; margin-top:0.25rem;">${logData.eventId}</code>
+        </div>
+        <div>
+          <strong>Type:</strong><br>
+          <span style="margin-top:0.25rem; display:inline-block;">${logData.type}</span>
+        </div>
+        <div>
+          <strong>Counter Value:</strong><br>
+          <span style="font-size:1.2rem; font-weight:bold; margin-top:0.25rem; display:inline-block;">${logData.counter}</span>
+        </div>
+        <div>
+          <strong>Device Timestamp:</strong><br>
+          <code style="font-size:0.9rem; background:#f1f5f9; padding:0.5rem; border-radius:4px; display:block; margin-top:0.25rem;">${logData.deviceTimestamp}</code>
+        </div>
+        <div>
+          <strong>Server Time:</strong><br>
+          <span style="margin-top:0.25rem; display:inline-block;">${logData.serverTime}</span>
+        </div>
+        <div>
+          <strong>Status:</strong><br>
+          <span style="margin-top:0.25rem; display:inline-block;">${logData.status}</span>
+        </div>
+      </div>
+    `;
+    
+    modal.style.display = 'block';
+  }
+}
+
+function closeLogDetails() {
+  document.getElementById('logDetailsModal').style.display = 'none';
+}
+
+// Close modal when clicking outside
+window.onclick = function(event) {
+  const modal = document.getElementById('logDetailsModal');
+  if (event.target === modal) {
+    modal.style.display = 'none';
+  }
+}
+
+// Update table immediately on page load
+console.log('🚀 Updating treatment logs immediately...');
+updateTreatmentLogs();
+
+// Start auto-refresh every 5 seconds
+console.log('🚀 Starting treatment logs auto-refresh...');
+setInterval(updateTreatmentLogs, 5000);
+
+// Manual refresh function
+window.refreshTreatmentLogs = updateTreatmentLogs;
+{% endblock %}

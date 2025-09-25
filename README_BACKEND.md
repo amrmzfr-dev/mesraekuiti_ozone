@@ -1,3 +1,150 @@
+Ozone Telemetry Backend — Version 2025-09-25T14:50Z
+
+Overview
+This repository contains the Django backend for the Ozone telemetry platform. It manages device authentication, event ingestion, command delivery to ESP32 devices, status tracking, outlet/machine management, and web dashboards.
+
+What’s New in This Stamped Version
+- Device status is based on ESP32 polling (last_poll) with thresholds: Online (≤16 min), Idle (≤1 hr), Offline (>1 hr)
+- Backend-to-ESP32 command system (queue, polling, results)
+- Current counters from ESP32 supported in events and command results and reflected in UI
+- Treatment logs per machine (with cumulative counters and reset entries) + smooth auto-refresh without scroll jumps
+- Outlets table now auto-refreshes like devices/machines
+- Machines page: assign/unassign to outlets, view treatment logs, delete machine
+- Devices page: Outlet column added, MAC column removed, View/Quick Command removed, Commands retained
+- Fixes for device assignment, admin config, and UI flicker
+
+Tech Stack
+- Django 5
+- Django REST Framework
+- HTMX + vanilla JS for dynamic tables
+- SQLite (default)
+
+Project Structure (backend)
+- ozontelemetry/ — Django project
+- telemetry/ — App with models, APIs, views, templates
+  - api/ingest.py — devices API (handshake, events, devices data)
+  - api/commands.py — command polling and result reporting
+  - templates/ — dashboards and management UIs
+
+Data Models (key fields)
+- Device
+  - device_id (MAC), mac, token, assigned, firmware, last_seen
+  - OneToOne to Machine via Machine.device
+- Machine
+  - machine_id, machine_code/name, outlet (FK), device (OneToOne)
+- Outlet
+  - outlet_id, outlet_name, region
+- DeviceStatus
+  - device_id, wifi_connected, current_count_basic/standard/premium, last_seen, last_poll, device_timestamp
+- TelemetryEvent
+  - device_id, event_id, event, treatment, counter, event_type, count_basic/standard/premium, occurred_at, device_timestamp, wifi_status, payload
+- Command
+  - command_id (unique), device (FK), command_type, priority, payload, description, status (pending/sent/executed/failed/timeout), created_at, sent_at, executed_at, response_data, error_message, retry_count, created_by, expires_at
+
+Device Status Logic (last_poll-first)
+- Prefer DeviceStatus.last_poll (updated when ESP32 polls commands)
+- Fallback to DeviceStatus.last_seen (updated on events/results)
+- Thresholds: online ≤ 16min, idle ≤ 1hr, offline > 1hr
+
+ESP32 Flow
+1) Handshake
+   - POST /api/handshake/
+   - Body: mac, firmware
+   - Returns: { device_id, token, assigned }
+   - Save token persistently on ESP32
+2) Poll Commands (requires assignment + Bearer token)
+   - GET /api/device/{device_id}/commands/
+   - Header: Authorization: Bearer <token>
+   - Response items include both id and command_id
+3) Execute and Report Result
+   - POST /api/device/{device_id}/commands/{command_id}/
+   - Body: { success, message?, response_data?, current_counters? }
+4) Events (treatments)
+   - POST /api/device/events/
+   - Body: { device_id, event_id, event:"treatment", treatment: BASIC|STANDARD|PREMIUM, counter, ts, current_counters? }
+   - If current_counters present, DeviceStatus counters are updated as source of truth
+
+Web Pages (selected)
+- /devices/ — devices list (status, assignment, outlet, commands link)
+- /machines/ — machines list (outlet, device, counters, status) with Assign/Unassign, View Logs, Delete
+- /machines/{machine_id}/logs/ — treatment logs page with:
+  - Unified Machine Stats card: historical totals and current counters
+  - Log table: treatment and reset entries with Basic/Standard/Premium columns
+  - Auto-refresh via JSON API without scroll jump
+- /outlets/ — outlets list with per-outlet totals, auto-refresh
+
+APIs
+- Devices and Events
+  - POST /api/handshake/
+  - POST /api/device/events/ (alias of /api/events/)
+  - GET  /api/devices/ — devices data for UI (includes bound_machine with outlet_name)
+  - GET  /api/devices/online/
+- Commands
+  - GET  /api/device/{device_id}/commands/ — ESP32 polls, marks sent, updates last_poll
+  - POST /api/device/{device_id}/commands/{command_id}/ — ESP32 reports result; updates counters/last_seen
+  - POST /api/device/{device_id}/commands/create/ — staff-only create via API
+  - GET  /api/device/{device_id}/commands/status/ — staff-only command status
+  - POST /api/commands/bulk/ — staff-only bulk create
+  - POST /api/commands/{command_id}/retry/ — staff-only retry
+- Machine Management & Logs
+  - POST /machines/{machine_id}/assign/ (web)
+  - POST /machines/{machine_id}/unassign/ (web)
+  - POST /machines/{machine_id}/delete/ (web)
+  - GET  /api/machines/{machine_id}/logs/ — JSON for auto-refresh on logs page
+
+Counters & Treatment Logs
+- Historical totals come from TelemetryEvent (never deleted): used for analytics
+- Current counters live in DeviceStatus and reflect true device state (updated by events current_counters or reset results)
+- Machine logs show cumulative Basic/Standard/Premium per row:
+  - Computed in the browser by walking logs chronologically
+  - Uses payload.current_counters when available; on RESET uses 0/0/0 (or response current_counters)
+
+Security & Auth
+- Commands endpoints require Bearer token from handshake and assigned=True
+- Handshake returns token; device must persist and attach it
+- Admin-only command creation/status/retry/bulk endpoints
+
+Setup
+1) Install
+   - Python 3.13, pip install -r requirements.txt (create one if needed)
+2) Run migrations
+   - python manage.py migrate
+3) Create superuser (optional)
+   - python manage.py createsuperuser
+4) Run server
+   - python manage.py runserver
+
+Quick Test Flow
+1) Handshake: POST /api/handshake/ with mac, firmware
+2) Assign device to machine via web UI (/devices/ or /machines/)
+3) ESP32 polls commands with Bearer token
+4) Send command from web UI (device detail → Commands)
+5) ESP32 executes and reports result (optionally with current_counters)
+6) Post treatment events with current_counters to keep backend in sync
+
+Known UX Details
+- Tables auto-refresh every second (devices, machines, outlets) or 5s (logs) without scroll jumps
+- Initial “Loading...” placeholders prevent flicker
+- Status badges: online (green), idle (yellow), offline (red), loading (gray)
+
+Troubleshooting
+- 401 on commands: device not assigned, missing/invalid Bearer token, or device_id mismatch
+- Counters not updating: ensure ESP32 sends current_counters in events and on reset results
+- Outlet name on devices list: comes from devices API bound_machine.outlet_name
+
+Change Log (highlights)
+- Fixed silent device assignment failure (RelatedObjectDoesNotExist)
+- Corrected admin Outlet configuration
+- Added Command model and API with dual id/command_id fields for ESP32 compatibility
+- Updated ingest to accept current_counters and update DeviceStatus
+- Added last_poll to DeviceStatus; status uses poll first
+- Devices/Machines/Outlets tables unified behavior and reduced flicker
+- Treatment logs page with cumulative counters and reset entries + smooth refresh
+- Machines can be assigned/unassigned, and deleted from UI
+
+License
+Proprietary — internal project.
+
 ===============================================================================================================================================================
 =========================================================== OZONE TELEMETRY BACKEND API (DJANGO) =============================================================
 ===============================================================================================================================================================
@@ -229,6 +376,8 @@ Notes:
 **GET** `/api/devices/online/`
 - **Response**: List of devices online in last 5 minutes
 
+- need to add checking poll, on the esp32
+
 **GET** `/api/devices/all/`
 - **Response**: List of all devices (online and offline)
 
@@ -383,7 +532,7 @@ Notes:
 ---
 
 ===============================================================================================================================================================
-======================================================================= DATA MODELS ===========================================================================
+==================================================================== DATA MODELS ==============================================================================
 ===============================================================================================================================================================
 
 ### Device
@@ -553,7 +702,50 @@ curl "http://localhost:8000/api/test/stats-export.csv?days=30" \
 - **Data Retention**: No automatic data cleanup (implement as needed)
 
 ===============================================================================================================================================================
-=========================================================== SECURITY CONSIDERATIONS ==========================================================================
+================================================================== SECURITY CONSIDERATIONS ====================================================================
+===============================================================================================================================================================
+
+- Device tokens should be rotated periodically
+- Admin endpoints require authentication
+- Consider implementing rate limiting for production
+- Validate all input data
+- Use HTTPS in production
+- Implement proper CORS policies
+
+===============================================================================================================================================================
+===================================================================== CURRENT STATUS (2025-09-25) ==============================================================
+===============================================================================================================================================================
+
+### ✅ WORKING FEATURES:
+- **Device Authentication**: Bearer token system working correctly
+- **Device Assignment**: Web interface assignment now works (fixed RelatedObjectDoesNotExist bug)
+- **Event Ingestion**: ESP32 devices can post events with proper authentication
+- **Device Management**: Full CRUD operations for devices, machines, outlets
+- **Analytics**: Statistics and analytics APIs functional
+- **User Authentication**: Session-based auth for web interface
+
+### 🔧 RECENT FIXES:
+- **Device Assignment Bug**: Fixed silent failure in web assignment due to RelatedObjectDoesNotExist exception
+- **Authentication Flow**: Device events endpoint now properly authenticates assigned devices
+- **Relationship Management**: Bidirectional Device-Machine relationships working correctly
+
+### 📊 CURRENT DATABASE STATE:
+- **Devices**: 1 device (3C:8A:1F:A4:22:D4) - ASSIGNED ✅
+- **Machines**: 1 machine (CH1/027/2024) - HAS DEVICE ✅
+- **Assignment Status**: 1 assigned device, 0 unassigned devices
+- **Authentication**: Device can authenticate with Bearer token
+
+### 🚀 RECENTLY IMPLEMENTED:
+- **Command System**: Complete backend-to-ESP32 command architecture ✅
+- **Command Queue**: Pending commands management ✅
+- **Command API**: Polling and execution tracking ✅
+- **Web Command Interface**: Command management UI ✅
+- **Current Counters Support**: ESP32 can send complete counter state ✅
+- **Reset Command Integration**: Backend updates counters on reset ✅
+- **Improved Device Status**: Online (16min)/Idle (1hr)/Offline (>1hr) based on ESP32 polling ✅
+
+===============================================================================================================================================================
+================================================================== SECURITY CONSIDERATIONS ====================================================================
 ===============================================================================================================================================================
 
 - Device tokens should be rotated periodically

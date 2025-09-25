@@ -1,0 +1,59 @@
+<div class="table-container">
+  <div class="table-scrollable">
+    <table id="machines-table" class="table">
+      <thead>
+        <tr>
+          <th>No.</th>
+          <th>Name</th>
+          <th>Outlet</th>
+          <th>Device</th>
+          <th>Basic</th>
+          <th>Standard</th>
+          <th>Premium</th>
+          <th>Installed</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for m in machines %}
+        <tr>
+          <td>{{ forloop.counter }}</td>
+          <td>{{ m.name }}</td>
+          <td>{% if m.outlet %}{{ m.outlet.outlet_name }}{% else %}<span class="text-danger">Unassigned</span>{% endif %}</td>
+          <td>{% if m.device and m.device.mac %}{{ m.device.mac }}{% else %}<span class="text-danger">No ESP</span>{% endif %}</td>
+          <td>{{ m.device.device_status.current_count_basic|default:'0' }}</td>
+          <td>{{ m.device.device_status.current_count_standard|default:'0' }}</td>
+          <td>{{ m.device.device_status.current_count_premium|default:'0' }}</td>
+          <td>{{ m.installed_at|date:'Y-m-d' }}</td>
+          <td>
+            <span class="status-badge status-loading">Loading...</span>
+          </td>
+          <td>
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap;">
+              <a href="/machines/{{ m.machine_id }}/logs/" class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.5rem">View Logs</a>
+              {% if m.outlet %}
+                <form method="POST" action="/machines/{{ m.machine_id }}/unassign/" style="display:inline;">
+                  {% csrf_token %}
+                  <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
+                </form>
+              {% else %}
+                <button onclick="showAssignModal('{{ m.machine_id }}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>
+              {% endif %}
+              <form method="POST" action="/machines/{{ m.machine_id }}/delete/" style="display:inline;" onsubmit="return confirm('Delete this machine? This cannot be undone.');">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="11">No machines yet</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+
+
