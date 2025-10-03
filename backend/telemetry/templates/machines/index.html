@@ -32,7 +32,7 @@
 
 <!-- Assignment Modal -->
 <div id="assignModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:2000">
-  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:2rem;border-radius:8px;min-width:400px">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:1rem;border-radius:8px;width:90%;max-width:400px;max-height:90vh;overflow-y:auto">
     <h3>Assign Machine to Outlet</h3>
     <form id="assignForm" method="POST">
       {% csrf_token %}
@@ -122,18 +122,18 @@ function updateMachinesTable() {
           <td>${machine.installed_at ? new Date(machine.installed_at).toISOString().split('T')[0] : '-'}</td>
           <td>${getDeviceStatusBadge(machine.device)}</td>
           <td>
-            <div style="display:flex; gap:0.25rem; flex-wrap:wrap;">
-              <a href="/machines/${machine.id}/logs/" class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.5rem">View Logs</a>
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; justify-content:center;">
+              <a href="/machines/${machine.id}/logs/" class="btn btn-primary">View Logs</a>
               ${machine.outlet && machine.outlet.outlet_name ? 
                 `<form method="POST" action="/machines/${machine.id}/unassign/" style="display:inline;">
                   <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]').value}">
-                  <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
+                  <button type="submit" class="btn btn-danger">Unassign</button>
                 </form>` :
-                `<button onclick="showAssignModal('${machine.id}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>`
+                `<button onclick="showAssignModal('${machine.id}')" class="btn btn-secondary">Assign</button>`
               }
               <form method="POST" action="/machines/${machine.id}/delete/" style="display:inline;" onsubmit="return confirm('Delete this machine? This cannot be undone.');">
                 <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]').value}">
-                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Delete</button>
+                <button type="submit" class="btn btn-danger">Delete</button>
               </form>
             </div>
           </td>

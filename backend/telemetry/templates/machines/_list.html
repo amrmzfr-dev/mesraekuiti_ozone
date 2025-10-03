@@ -30,19 +30,19 @@
             <span class="status-badge status-loading">Loading...</span>
           </td>
           <td>
-            <div style="display:flex; gap:0.25rem; flex-wrap:wrap;">
-              <a href="/machines/{{ m.machine_id }}/logs/" class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.5rem">View Logs</a>
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; justify-content:center;">
+              <a href="/machines/{{ m.machine_id }}/logs/" class="btn btn-primary">View Logs</a>
               {% if m.outlet %}
                 <form method="POST" action="/machines/{{ m.machine_id }}/unassign/" style="display:inline;">
                   {% csrf_token %}
-                  <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
+                  <button type="submit" class="btn btn-danger">Unassign</button>
                 </form>
               {% else %}
-                <button onclick="showAssignModal('{{ m.machine_id }}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>
+                <button onclick="showAssignModal('{{ m.machine_id }}')" class="btn btn-secondary">Assign</button>
               {% endif %}
               <form method="POST" action="/machines/{{ m.machine_id }}/delete/" style="display:inline;" onsubmit="return confirm('Delete this machine? This cannot be undone.');">
                 {% csrf_token %}
-                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Delete</button>
+                <button type="submit" class="btn btn-danger">Delete</button>
               </form>
             </div>
           </td>

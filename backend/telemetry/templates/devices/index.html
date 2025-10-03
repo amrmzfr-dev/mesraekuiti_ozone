@@ -60,15 +60,17 @@
           <td>{% if device.machine and device.machine.outlet %}{{ device.machine.outlet.outlet_name }}{% else %}-{% endif %}</td>
           <td>Loading...</td>
           <td>
-            <a href="/devices/{{ device.device_id }}/commands/" class="btn btn-info" style="font-size:0.75rem;padding:0.25rem 0.5rem">Commands</a>
-            {% if device.assigned %}
-              <form method="POST" action="/devices/{{ device.device_id }}/unassign/" style="display:inline;">
-                {% csrf_token %}
-                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
-              </form>
-            {% else %}
-              <button onclick="showAssignModal('{{ device.device_id }}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>
-            {% endif %}
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; justify-content:center;">
+              <a href="/devices/{{ device.device_id }}/commands/" class="btn btn-info">Commands</a>
+              {% if device.assigned %}
+                <form method="POST" action="/devices/{{ device.device_id }}/unassign/" style="display:inline;">
+                  {% csrf_token %}
+                  <button type="submit" class="btn btn-danger">Unassign</button>
+                </form>
+              {% else %}
+                <button onclick="showAssignModal('{{ device.device_id }}')" class="btn btn-secondary">Assign</button>
+              {% endif %}
+            </div>
           </td>
         </tr>
         {% empty %}
@@ -87,7 +89,7 @@
 
 <!-- Assignment Modal -->
 <div id="assignModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:2000">
-  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:2rem;border-radius:8px;min-width:400px">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:1rem;border-radius:8px;width:90%;max-width:400px;max-height:90vh;overflow-y:auto">
     <h3>Assign Device to Machine</h3>
     <form id="assignForm" method="POST">
       {% csrf_token %}
@@ -209,14 +211,16 @@ function updateDevicesTable() {
           <td>${(device.bound_machine && device.bound_machine.outlet_name) ? device.bound_machine.outlet_name : '-'}</td>
           <td>${formatLastSeen(device.last_seen)}</td>
           <td>
-            <a href="/devices/${device.device_id}/commands/" class="btn btn-info" style="font-size:0.75rem;padding:0.25rem 0.5rem">Commands</a>
-            ${device.assigned ? 
-              `<form method="POST" action="/devices/${device.device_id}/unassign/" style="display:inline;">
-                <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]').value}">
-                <button type="submit" class="btn btn-danger" style="font-size:0.75rem;padding:0.25rem 0.5rem">Unassign</button>
-              </form>` :
-              `<button onclick="showAssignModal('${device.device_id}')" class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem">Assign</button>`
-            }
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; justify-content:center;">
+              <a href="/devices/${device.device_id}/commands/" class="btn btn-info">Commands</a>
+              ${device.assigned ? 
+                `<form method="POST" action="/devices/${device.device_id}/unassign/" style="display:inline;">
+                  <input type="hidden" name="csrfmiddlewaretoken" value="${document.querySelector('[name=csrfmiddlewaretoken]').value}">
+                  <button type="submit" class="btn btn-danger">Unassign</button>
+                </form>` :
+                `<button onclick="showAssignModal('${device.device_id}')" class="btn btn-secondary">Assign</button>`
+              }
+            </div>
           </td>
         `;
         tbody.appendChild(row);
