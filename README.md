@@ -1,23 +1,24 @@
 ================================================================================================================================================================
-========================================================= OZONE MACHINE COUNTER SYSTEM (ESP32 + 20x4 I2C LCD)===================================================
+========================================================= OZONE MACHINE COUNTER SYSTEM (ESP32)===================================================
 ================================================================================================================================================================
 
-This firmware powers an ozone machine counter-and-control panel built on an ESP32 with a 20x4 I2C LCD. It manages three treatment types (BASIC, STANDARD, PREMIUM) with per‑treatment timers, relays, and persistent counters stored in EEPROM. The UI is button‑driven and designed to be non‑blinking and robust for rental/production scenarios.
+This firmware powers an ozone machine counter-and-control panel built on an ESP32. It manages three treatment types (BASIC, STANDARD, PREMIUM) with per‑treatment timers, relays, and persistent counters stored in EEPROM. The system is designed to be robust for rental/production scenarios with button-driven operation.
 
 ### Key Features
-- 20x4 I2C LCD with clean, stable UI (no unnecessary redraw/blink)
 - Three treatments:
   - BASIC (B)
   - STANDARD (S)
   - PREMIUM (P)
 - Treatment timers: 5 min, 10 min, 15 min (B/S/P)
-- Single relay channel (GPIO23) held ON for full treatment duration (all B/S/P)
+- **6-channel relay system**: 3 treatment relays + 3 LED mirror relays
+- **Individual relay control**: Each treatment activates its specific relay + LED
 - Per‑treatment counters persisted in EEPROM (survive power cycles)
 - Start‑on‑press counting (counter increments immediately on button press, not at timer end)
 - Long‑press stop during a running timer (PREMIUM button ≥ 2s)
 - Wi‑Fi connectivity with local web configuration interface
 - AP mode fallback for initial setup and configuration
 - Cloud logging API with persistent queueing and exponential backoff retry
+- **Automatic WiFi reconnection** with smart retry logic and connection quality monitoring
 
 ===============================================================================================================================================================
 ============================================================================ HARDWARE =========================================================================
@@ -25,13 +26,6 @@ This firmware powers an ozone machine counter-and-control panel built on an ESP3
 
 ### Controller
 - Board: ESP32 DevKit (esp32dev)
-
-### LCD
-- 20 columns x 4 rows, HD44780 compatible via PCF8574/PCF8574A I2C backpack
-- Typical I2C address: `0x27` or `0x3F` (this project uses `0x27`)
-- I2C pins on ESP32:
-  - SDA: GPIO 21
-  - SCL: GPIO 22
 
 ### Buttons
 - Module type: 2‑pin buttons to GND, with internal pull‑ups enabled
@@ -43,11 +37,20 @@ This firmware powers an ozone machine counter-and-control panel built on an ESP3
 Important: Avoid ESP32 bootstrap pins (e.g., GPIO0, GPIO2) for buttons due to boot mode interference and phantom presses.
 
 ### Relay / Output
-- Single relay channel (active level configurable in code, default active‑LOW boards are supported)
-- Relay IN → GPIO 23 (shared for all BASIC/STANDARD/PREMIUM treatments)
+- **8-channel relay board** (6 channels used, 2 reserved)
+- **Treatment Relays** (3 channels for ozone generator control):
+  - BASIC Treatment: GPIO 23 (IN1)
+  - STANDARD Treatment: GPIO 22 (IN2)
+  - PREMIUM Treatment: GPIO 21 (IN3)
+- **LED Mirror Relays** (3 channels for LED indication):
+  - BASIC LED: GPIO 19 (IN4)
+  - STANDARD LED: GPIO 18 (IN5)
+  - PREMIUM LED: GPIO 5 (IN6)
+- **Reserved Channels** (2 channels for future expansion):
+  - IN7: Available for future use
+  - IN8: Available for future use
 - Ensure relay board GND is common with the ESP32
-
-Note: A 4‑channel relay board can be used but only IN1 is wired; other channels remain unconnected.
+- Each treatment activates its specific relay + corresponding LED mirror
 
 ### RTC (optional, recommended)
 - Module: DS3231 (I2C)
@@ -57,7 +60,7 @@ Note: A 4‑channel relay board can be used but only IN1 is wired; other channel
 - Address: 0x68
 
 ### Power
-- The LCD and relays are powered from 5V; ESP32 is powered via USB or regulated 5V input. Ensure sufficient current budget.
+- ESP32 is powered via USB or regulated 5V input. Ensure sufficient current budget.
 
 ### Wi‑Fi
 - ESP32 has built‑in Wi‑Fi capability
@@ -72,23 +75,22 @@ Note: A 4‑channel relay board can be used but only IN1 is wired; other channel
 ### Project
 - PlatformIO (Arduino framework)
 - `platformio.ini` includes:
-  - `LiquidCrystal_I2C@^1.1.4`
-  - `jm_PCF8574@^2.0.0` (kept in deps; current code uses `LiquidCrystal_I2C`)
   - `EEPROM@2.0.0`
   - `bblanchon/ArduinoJson@^7.0.4`
   - `monitor_speed = 115200`
 
 ### Source Structure
-- **Main file**: `src/main.cpp` — Core system + pins + LCD + buttons + timers + relays + EEPROM + Wi‑Fi + embedded web UI
+- **Main file**: `src/main.cpp` — Core system + pins + buttons + timers + relays + EEPROM + Wi‑Fi + embedded web UI
 - **Pins**: `include/pins.h` — Centralized pin map and constants
 - (Removed) `src/config.h`, `src/web_interface.h/.cpp` — no longer used
 
 ### Pin Map (code)
 ```
-SDA=21, SCL=22
-UP=27, DOWN=14, SELECT=15
-RELAY=23
-RTC_SDA=25, RTC_SCL=26
+BUTTONS: BASIC=27, STANDARD=14, PREMIUM=15
+TREATMENT RELAYS: BASIC=23(IN1), STANDARD=22(IN2), PREMIUM=21(IN3)
+LED MIRROR RELAYS: BASIC=19(IN4), STANDARD=18(IN5), PREMIUM=5(IN6)
+RTC: SDA=25, SCL=26
+RESERVED: IN7, IN8 (available for future expansion)
 ```
 
 ===============================================================================================================================================================
@@ -155,6 +157,37 @@ Files:
 - Credentials persist across power cycles
 
 ===============================================================================================================================================================
+====================================================================== WI‑FI RECONNECTION =====================================================================
+===============================================================================================================================================================
+
+### Automatic WiFi Reconnection
+The system includes robust WiFi reconnection capabilities to ensure continuous operation during network outages.
+
+**Reconnection Features:**
+- **Periodic Reconnection**: Automatic attempts every 30 seconds when disconnected
+- **Event-Driven Triggers**: Immediate reconnection on network operation failures
+- **Exponential Backoff**: Smart retry intervals (30s → 60s → 120s → 300s max)
+- **Connection Quality Monitoring**: RSSI tracking with degradation warnings
+- **Jitter**: ±20% randomization to prevent network flooding
+
+**Reconnection Triggers:**
+- Handshake failures during device registration
+- Upload failures during event transmission
+- Command polling failures during remote command retrieval
+- Periodic checks when offline
+
+**Connection Quality Thresholds:**
+- **Good Signal**: RSSI > -70 dBm
+- **Degraded Signal**: RSSI -80 to -70 dBm (warning issued)
+- **Poor Signal**: RSSI < -80 dBm (reconnection may be triggered)
+- **Critical Signal**: RSSI < -90 dBm (connection unstable warning)
+
+**Debug Commands:**
+- `m` - Force immediate reconnection attempt
+- `w` - Display WiFi diagnostics and signal strength
+- `t` - Test network connectivity
+
+===============================================================================================================================================================
 ====================================================================== CLOUD LOGGING API ======================================================================
 ===============================================================================================================================================================
 
@@ -208,33 +241,32 @@ The system reports treatment button presses to a web backend for billing/auditin
 ========================================================================== UI & BEHAVIOR ======================================================================
 ===============================================================================================================================================================
 
-### Main Page (20x4)
-- Row 0: "OZONE MACHINE" (centered)
-- Row 1: Counters in the format `0000 0000 0000` (B S P)
-- Row 2: Labels ` B   S   P ` (no selection cursor; buttons are direct)
-- Row 3: Instruction line `BASIC  STD  PREM`
+### Main Operation
+- Button-driven operation with three treatment modes
+- Counters in the format `0000 0000 0000` (B S P)
+- Labels ` B   S   P ` (buttons are direct action)
+- Treatment types: `BASIC  STD  PREM`
 
 Navigation (direct-start buttons):
-- BASIC button (GPIO4): starts BASIC timer immediately
+- BASIC button (GPIO27): starts BASIC timer immediately
 - STANDARD button (GPIO14): starts STANDARD timer immediately
 - PREMIUM button (GPIO15): starts PREMIUM timer immediately
 
 Counting rule (business logic):
-- The counter increments immediately when SELECT starts a treatment.
+- The counter increments immediately when button starts a treatment.
 - The counter does not increment again when the timer completes.
 
-### Timer Page
-- Row 0: "OZONE MACHINE"
-- Row 1: Treatment name (centered precisely):
-  - BASIC TREATMENT (15 chars)
-  - STANDARD TREATMENT (17 chars)
-  - PREMIUM TREATMENT (16 chars)
-- Row 2: `MM:SS` countdown (only the digits update per second; text remains static)
-- Row 3: blank
+### Timer Operation
+- Treatment name display:
+  - BASIC TREATMENT
+  - STANDARD TREATMENT
+  - PREMIUM TREATMENT
+- `MM:SS` countdown timer
+- Stop instruction: "hold x for 2s to stop"
 
 While timer is active:
 - All start buttons are ignored.
-- PREMIUM button long‑press (≥ 2s) stops the timer and returns to the main page.
+- PREMIUM button long‑press (≥ 2s) stops the timer and returns to main operation.
 
 ### Reset
 - Button-based reset is disabled.
@@ -292,47 +324,41 @@ pio device monitor -b 115200 --port COM3
 ===============================================================================================================================================================
 
 LCD shows backlight but no text:
-- Verify I2C address (0x27 vs 0x3F)
-- Adjust LCD contrast potentiometer on the backpack
-- Confirm SDA=21 / SCL=22 wiring
+- LCD functionality has been removed from this firmware.
+- System operates as a headless device with button-driven operation.
 
 Buttons not detected / phantom presses:
 - Ensure INPUT_PULLUP is used and buttons go to GND
 - Avoid boot‑strap pins (GPIO0, GPIO2)
-- Verify with serial logs that button states toggle
+- Verify button functionality through web interface or debugging
 
 Relays not switching:
 - Ensure a common GND between relay module and ESP32
 - Confirm relay board logic level compatibility and INx mapping
 
-Display blinking:
- - This firmware minimizes redraws. If you add prints, avoid clearing full screen repeatedly; use partial updates (see `updateTimerDisplay()`).
-
-===============================================================================================================================================================
-============================================================================ LCD SLEEP ========================================================================
-===============================================================================================================================================================
-
-- The LCD backlight turns off after 2 minutes of inactivity on the main page.
-- Any button press wakes the screen. The wake press does not navigate or start a treatment.
-- The LCD never sleeps while a treatment timer is active.
+WiFi connection issues:
+- System automatically attempts reconnection every 30 seconds
+- Use debug command `m` to force immediate reconnection
+- Check signal strength with `w` command
+- Monitor RSSI levels for connection quality
 
 ===============================================================================================================================================================
 ====================================================================== CODE STRUCTURE (HIGH LEVEL) ============================================================
 ===============================================================================================================================================================
 
 - `setup()`
-  - Init I2C/LCD, buttons, relays
+  - Init buttons, relays
   - Init EEPROM and load counters
-  - Draw initial main screen
+  - Initialize main operation state
 
 - `loop()`
   - `handleButtons()` for navigation, start/stop, reset flow
   - `updateTimer()` if timer active
-  - Periodic display updates (only when needed)
+  - Periodic system updates (only when needed)
 
 - Display
-  - `updateDisplay()` draws main or timer views and the reset prompt
-  - `updateTimerDisplay()` only updates the timer digits `MM:SS`
+  - `updateDisplay()` manages main or timer states
+  - `updateTimerDisplay()` handles timer countdown logic
 
 - Actions
   - `startTimer()` sets duration, activates relay, increments and saves counter
@@ -346,9 +372,9 @@ Display blinking:
 ========================================================================== OPERATIONAL NOTES ==================================================================
 ===============================================================================================================================================================
 
-- Counters increment at treatment start (SELECT press), not on completion. This is intentional for billing integrity in rental scenarios.
+- Counters increment at treatment start (button press), not on completion. This is intentional for billing integrity in rental scenarios.
 - Navigation (UP/DOWN) is disabled during an active timer.
-- SELECT long‑press (≥ 2s) only stops an active timer; it does nothing on the main page except starting a treatment with a short press.
+- PREMIUM long‑press (≥ 2s) only stops an active timer; it does nothing on the main page except starting a treatment with a short press.
 - Reset requires two steps: 10s UP+DOWN hold, then SELECT to confirm (or DOWN to cancel).
 
 ===============================================================================================================================================================
@@ -356,14 +382,13 @@ Display blinking:
 ===============================================================================================================================================================
 
 - Change button pins if your board differs; avoid GPIO0/GPIO2.
-- Adjust LCD centering by altering `lcd.setCursor(col,row)` in `updateDisplay()`.
 - Modify relay polarity if your hardware uses active‑LOW modules.
 
 ===============================================================================================================================================================
 ========================================================================== LICENSE & CREDITS ==================================================================
 ===============================================================================================================================================================
 
-- Uses `LiquidCrystal_I2C`, `jm_PCF8574`, and Arduino EEPROM emulation libraries.
+- Uses Arduino EEPROM emulation libraries.
 - Project intended for embedded control/rental system use cases.
 
 

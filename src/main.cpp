@@ -102,6 +102,34 @@ static uint32_t lastCommandPoll = 0;
 static uint32_t commandRetryDelay = RETRY_BASE_DELAY_MS;
 static uint8_t commandRetryAttempts = 0;
 
+// WiFi Reconnection State
+static uint32_t lastReconnectAttempt = 0;
+static uint32_t reconnectDelay = 30000; // Start with 30 seconds
+static uint8_t reconnectAttempts = 0;
+static int32_t lastRSSI = -100; // Track connection quality
+static uint32_t lastConnectionCheck = 0;
+
+// Advanced WiFi Statistics
+struct WiFiStats {
+  uint32_t packetsSent;
+  uint32_t packetsLost;
+  uint32_t totalLatency;
+  uint32_t latencySamples;
+  uint32_t minLatency;
+  uint32_t maxLatency;
+  int32_t minRSSI;
+  int32_t maxRSSI;
+  uint32_t disconnections;
+  uint32_t reconnections;
+  uint32_t lastPingTime;
+  uint32_t consecutiveFailures;
+  float connectionQualityScore;
+};
+
+static WiFiStats wifiStats = {0};
+static uint32_t lastPingTest = 0;
+static uint32_t lastStatsUpdate = 0;
+
 // RTC instance
 static RTC_DS3231 g_rtc;
 
@@ -236,18 +264,18 @@ static CommandType parseCommandType(const String& typeStr) {
 
 static void drawMain() {
   Serial.println();
-  Serial.println("================ SIM LCD =================");
+  Serial.println("================ OZONE MACHINE =================");
   Serial.println("      OZONE MACHINE      ");
   char buf[32]; snprintf(buf,sizeof(buf),"%04lu %04lu %04lu",(unsigned long)counterB,(unsigned long)counterS,(unsigned long)counterP);
   Serial.println(buf);
   Serial.println("  B     S     P  ");
   Serial.println("BASIC  STD  PREM");
-  Serial.println("b=basic s=standard p=premium  x(hold)=stop  r=reset  t=test network  o=queue status  c=poll commands  q=clear command queue  d=debug command queue  j=json test  w=wifi diagnostics  n=reconnect wifi");
+  Serial.println("b=basic s=standard p=premium  x(hold)=stop  r=reset  t=test network  o=queue status  c=poll commands  q=clear command queue  d=debug command queue  j=json test  w=wifi diagnostics  n=reconnect wifi  m=manual reconnect  s=advanced stats");
 }
 
 static void drawTimer() {
   Serial.println();
-  Serial.println("================ SIM LCD =================");
+  Serial.println("================ OZONE MACHINE =================");
   Serial.println("      OZONE MACHINE      ");
   const char* name = (active==Treatment::Basic)?"BASIC TREATMENT":(active==Treatment::Standard)?"STANDARD TREATMENT":"PREMIUM TREATMENT";
   Serial.println(name);
@@ -396,6 +424,12 @@ static bool performHandshake() {
   } else {
     Serial.print("❌ HANDSHAKE: HTTP error ");
     Serial.println(code);
+    
+    // Trigger reconnection on handshake failure
+    if (code == -1 || code == -2 || code == -3) { // Connection errors
+      Serial.println("🔄 HANDSHAKE: Connection error detected, triggering WiFi reconnection");
+      lastReconnectAttempt = 0; // Force immediate reconnection attempt
+    }
   }
   http.end(); 
   return false;
@@ -508,6 +542,12 @@ static bool uploadEventJson(const String& jsonLine) {
       Serial.print("Unknown error: ");
       Serial.println(code);
     }
+    
+    // Trigger reconnection on upload failure
+    if (code == -1 || code == -2 || code == -3) { // Connection errors
+      Serial.println("🔄 UPLOAD: Connection error detected, triggering WiFi reconnection");
+      lastReconnectAttempt = 0; // Force immediate reconnection attempt
+    }
   }
   http.end(); 
   return ok;
@@ -544,6 +584,283 @@ static void testNetworkConnectivity() {
   } else {
     Serial.println("Disconnected");
   }
+}
+
+// ============================== WiFi Reconnection =====================================
+static void resetReconnectionBackoff() {
+  reconnectDelay = 30000; // Reset to 30 seconds
+  reconnectAttempts = 0;
+  Serial.println("🔄 WIFI: Reconnection backoff reset");
+}
+
+static uint32_t nextReconnectionDelay() {
+  uint32_t delay = reconnectDelay;
+  reconnectDelay = min(reconnectDelay * 2, 300000); // Max 5 minutes
+  reconnectAttempts++;
+  
+  // Add jitter to prevent thundering herd
+  uint32_t jitter = (delay * 20) / 100; // ±20% jitter
+  int32_t offset = random(-(int32_t)jitter, (int32_t)jitter + 1);
+  int64_t result = (int64_t)delay + offset;
+  
+  if (result < 10000) result = 10000; // Minimum 10 seconds
+  return (uint32_t)result;
+}
+
+static bool attemptWiFiReconnection() {
+  Serial.print("🔄 WIFI: Attempting reconnection (attempt #");
+  Serial.print(reconnectAttempts + 1);
+  Serial.print(") to '");
+  Serial.print(wifiSsid);
+  Serial.println("'");
+  
+  // Disconnect first to ensure clean state
+  WiFi.disconnect();
+  delay(1000);
+  
+  // Attempt reconnection
+  WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+  
+  uint32_t start = millis();
+  uint32_t timeout = min(15000, 5000 + (reconnectAttempts * 2000)); // Longer timeout for retries
+  
+  while (WiFi.status() != WL_CONNECTED && millis() - start < timeout) {
+    delay(250);
+    Serial.print('.');
+    
+    if (WiFi.status() == WL_CONNECT_FAILED) {
+      Serial.println("\n❌ WIFI: Connection failed - check credentials");
+      break;
+    }
+  }
+  Serial.println();
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("✅ WIFI: Reconnection successful! IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("📡 WIFI: RSSI: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    
+    // Reset backoff on successful connection
+    resetReconnectionBackoff();
+    lastRSSI = WiFi.RSSI();
+    wifiStats.reconnections++; // Track reconnection events
+    
+    // Sync RTC from NTP
+    if (syncRTCFromNTP()) {
+      Serial.println("⏰ NTP: RTC synchronized after reconnection");
+    }
+    
+    return true;
+  } else {
+    Serial.print("❌ WIFI: Reconnection failed (attempt #");
+    Serial.print(reconnectAttempts + 1);
+    Serial.println(")");
+    
+    // Update backoff delay
+    reconnectDelay = nextReconnectionDelay();
+    Serial.print("⏰ WIFI: Next reconnection attempt in ");
+    Serial.print(reconnectDelay / 1000);
+    Serial.println(" seconds");
+    
+    return false;
+  }
+}
+
+static void monitorConnectionQuality() {
+  if (WiFi.status() == WL_CONNECTED) {
+    int32_t currentRSSI = WiFi.RSSI();
+    
+    // Update RSSI statistics
+    if (wifiStats.minRSSI == 0 || currentRSSI < wifiStats.minRSSI) {
+      wifiStats.minRSSI = currentRSSI;
+    }
+    if (currentRSSI > wifiStats.maxRSSI) {
+      wifiStats.maxRSSI = currentRSSI;
+    }
+    
+    // Check for significant signal degradation
+    if (currentRSSI < -80 && lastRSSI > -70) {
+      Serial.print("⚠️ WIFI: Signal degraded - RSSI: ");
+      Serial.print(currentRSSI);
+      Serial.println(" dBm");
+    }
+    
+    // Check for connection loss
+    if (currentRSSI < -90) {
+      Serial.println("⚠️ WIFI: Very weak signal, connection may be unstable");
+    }
+    
+    lastRSSI = currentRSSI;
+  }
+}
+
+// ============================== Advanced WiFi Diagnostics =====================================
+static uint32_t performPingTest() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return 0; // No connection
+  }
+  
+  HTTPClient http;
+  String testUrl = String(BACKEND_BASE) + "/";
+  
+  uint32_t startTime = millis();
+  if (http.begin(testUrl)) {
+    http.setTimeout(2000); // 2 second timeout for ping
+    int code = http.GET();
+    uint32_t latency = millis() - startTime;
+    http.end();
+    
+    wifiStats.packetsSent++;
+    
+    if (code > 0) {
+      // Successful ping
+      wifiStats.totalLatency += latency;
+      wifiStats.latencySamples++;
+      
+      if (wifiStats.minLatency == 0 || latency < wifiStats.minLatency) {
+        wifiStats.minLatency = latency;
+      }
+      if (latency > wifiStats.maxLatency) {
+        wifiStats.maxLatency = latency;
+      }
+      
+      wifiStats.consecutiveFailures = 0;
+      wifiStats.lastPingTime = latency;
+      
+      return latency;
+    } else {
+      // Failed ping
+      wifiStats.packetsLost++;
+      wifiStats.consecutiveFailures++;
+      return 0;
+    }
+  } else {
+    wifiStats.packetsLost++;
+    wifiStats.consecutiveFailures++;
+    return 0;
+  }
+}
+
+static void updateConnectionQualityScore() {
+  if (wifiStats.packetsSent == 0) {
+    wifiStats.connectionQualityScore = 0.0;
+    return;
+  }
+  
+  float packetLossRate = (float)wifiStats.packetsLost / wifiStats.packetsSent;
+  float avgLatency = wifiStats.latencySamples > 0 ? 
+    (float)wifiStats.totalLatency / wifiStats.latencySamples : 0.0;
+  
+  // Calculate quality score (0-100)
+  float latencyScore = 0.0;
+  if (avgLatency > 0) {
+    if (avgLatency < 50) latencyScore = 100.0;
+    else if (avgLatency < 100) latencyScore = 80.0;
+    else if (avgLatency < 200) latencyScore = 60.0;
+    else if (avgLatency < 500) latencyScore = 40.0;
+    else latencyScore = 20.0;
+  }
+  
+  float packetLossScore = (1.0 - packetLossRate) * 100.0;
+  float rssiScore = 0.0;
+  
+  if (lastRSSI > -50) rssiScore = 100.0;
+  else if (lastRSSI > -60) rssiScore = 90.0;
+  else if (lastRSSI > -70) rssiScore = 80.0;
+  else if (lastRSSI > -80) rssiScore = 60.0;
+  else if (lastRSSI > -90) rssiScore = 30.0;
+  else rssiScore = 10.0;
+  
+  // Weighted average: 40% packet loss, 40% latency, 20% RSSI
+  wifiStats.connectionQualityScore = (packetLossScore * 0.4) + (latencyScore * 0.4) + (rssiScore * 0.2);
+}
+
+static void printAdvancedWiFiStats() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("📊 WIFI STATS: Not connected");
+    return;
+  }
+  
+  Serial.println("📊 WIFI STATS: Advanced Diagnostics");
+  Serial.println("=====================================");
+  
+  // Connection Info
+  Serial.print("📡 Status: Connected | IP: ");
+  Serial.print(WiFi.localIP());
+  Serial.print(" | RSSI: ");
+  Serial.print(WiFi.RSSI());
+  Serial.println(" dBm");
+  
+  // Packet Statistics
+  if (wifiStats.packetsSent > 0) {
+    float packetLossRate = (float)wifiStats.packetsLost / wifiStats.packetsSent * 100.0;
+    Serial.print("📦 Packets: ");
+    Serial.print(wifiStats.packetsSent - wifiStats.packetsLost);
+    Serial.print("/");
+    Serial.print(wifiStats.packetsSent);
+    Serial.print(" (");
+    Serial.print(100.0 - packetLossRate, 1);
+    Serial.print("% success) | Loss: ");
+    Serial.print(packetLossRate, 1);
+    Serial.println("%");
+  } else {
+    Serial.println("📦 Packets: No data available");
+  }
+  
+  // Latency Statistics
+  if (wifiStats.latencySamples > 0) {
+    float avgLatency = (float)wifiStats.totalLatency / wifiStats.latencySamples;
+    Serial.print("⏱️ Latency: ");
+    Serial.print(avgLatency, 0);
+    Serial.print("ms avg | ");
+    Serial.print(wifiStats.minLatency);
+    Serial.print("-");
+    Serial.print(wifiStats.maxLatency);
+    Serial.println("ms range");
+  } else {
+    Serial.println("⏱️ Latency: No data available");
+  }
+  
+  // RSSI Statistics
+  if (wifiStats.minRSSI != 0) {
+    Serial.print("📶 RSSI Range: ");
+    Serial.print(wifiStats.minRSSI);
+    Serial.print(" to ");
+    Serial.print(wifiStats.maxRSSI);
+    Serial.println(" dBm");
+  }
+  
+  // Connection Events
+  Serial.print("🔄 Events: ");
+  Serial.print(wifiStats.disconnections);
+  Serial.print(" disconnects, ");
+  Serial.print(wifiStats.reconnections);
+  Serial.println(" reconnects");
+  
+  // Quality Score
+  Serial.print("⭐ Quality Score: ");
+  Serial.print(wifiStats.connectionQualityScore, 1);
+  Serial.print("/100 (");
+  if (wifiStats.connectionQualityScore >= 90) Serial.println("Excellent)");
+  else if (wifiStats.connectionQualityScore >= 70) Serial.println("Good)");
+  else if (wifiStats.connectionQualityScore >= 50) Serial.println("Fair)");
+  else if (wifiStats.connectionQualityScore >= 30) Serial.println("Poor)");
+  else Serial.println("Critical)");
+  
+  // Warnings
+  if (wifiStats.consecutiveFailures > 3) {
+    Serial.print("⚠️ WARNING: ");
+    Serial.print(wifiStats.consecutiveFailures);
+    Serial.println(" consecutive ping failures");
+  }
+  
+  if (wifiStats.connectionQualityScore < 50) {
+    Serial.println("⚠️ WARNING: Poor connection quality detected");
+  }
+  
+  Serial.println("=====================================");
 }
 
 // ============================== Command System =====================================
@@ -670,6 +987,10 @@ static bool pollCommands() {
     Serial.print(code);
     if (code == -1) {
       Serial.println(" - Connection failed (network issue)");
+      
+      // Trigger reconnection on command polling failure
+      Serial.println("🔄 COMMAND: Connection error detected, triggering WiFi reconnection");
+      lastReconnectAttempt = 0; // Force immediate reconnection attempt
     } else {
       Serial.println();
     }
@@ -975,8 +1296,17 @@ static void printQueuedEvents() {
 // ============================== Actions ======================================
 static void stopTreatment() {
   if (active==Treatment::None) return;
-  // Relay OFF
-  digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
+  
+  // Turn OFF all treatment relays
+  digitalWrite(RELAY_BASIC_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(RELAY_STANDARD_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(RELAY_PREMIUM_PIN, RELAY_OFF_LEVEL);
+  
+  // Turn OFF all LED mirror relays
+  digitalWrite(LED_BASIC_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(LED_STANDARD_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(LED_PREMIUM_PIN, RELAY_OFF_LEVEL);
+  
   active=Treatment::None;
   activeDurationMs=0;
   activeStartMs=0;
@@ -1018,9 +1348,33 @@ static void enqueueTreatmentEvent(Treatment t, uint32_t counterVal) {
 
 static void startTimer(Treatment t) {
   if (active!=Treatment::None) return;
-  switch (t) { case Treatment::Basic: activeDurationMs=DURATION_B_MS; counterB++; enqueueTreatmentEvent(t,counterB); break; case Treatment::Standard: activeDurationMs=DURATION_S_MS; counterS++; enqueueTreatmentEvent(t,counterS); break; case Treatment::Premium: activeDurationMs=DURATION_P_MS; counterP++; enqueueTreatmentEvent(t,counterP); break; default: return; }
-  // Relay ON
-  digitalWrite(RELAY_PIN, RELAY_ON_LEVEL);
+  switch (t) { 
+    case Treatment::Basic: 
+      activeDurationMs=DURATION_B_MS; 
+      counterB++; 
+      enqueueTreatmentEvent(t,counterB); 
+      // Activate Basic treatment relay + LED mirror
+      digitalWrite(RELAY_BASIC_PIN, RELAY_ON_LEVEL);
+      digitalWrite(LED_BASIC_PIN, RELAY_ON_LEVEL);
+      break; 
+    case Treatment::Standard: 
+      activeDurationMs=DURATION_S_MS; 
+      counterS++; 
+      enqueueTreatmentEvent(t,counterS); 
+      // Activate Standard treatment relay + LED mirror
+      digitalWrite(RELAY_STANDARD_PIN, RELAY_ON_LEVEL);
+      digitalWrite(LED_STANDARD_PIN, RELAY_ON_LEVEL);
+      break; 
+    case Treatment::Premium: 
+      activeDurationMs=DURATION_P_MS; 
+      counterP++; 
+      enqueueTreatmentEvent(t,counterP); 
+      // Activate Premium treatment relay + LED mirror
+      digitalWrite(RELAY_PREMIUM_PIN, RELAY_ON_LEVEL);
+      digitalWrite(LED_PREMIUM_PIN, RELAY_ON_LEVEL);
+      break; 
+    default: return; 
+  }
   saveCounters(); active=t; activeStartMs=millis(); drawTimer();
 }
 
@@ -1064,11 +1418,27 @@ void setup(){
   }
 
   // GPIO setup
-  pinMode(BUTTON_UP_PIN, INPUT_PULLUP);      // BASIC
-  pinMode(BUTTON_DOWN_PIN, INPUT_PULLUP);    // STANDARD
-  pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);  // PREMIUM
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
+  pinMode(BUTTON_BASIC_PIN, INPUT_PULLUP);      // BASIC
+  pinMode(BUTTON_STANDARD_PIN, INPUT_PULLUP);    // STANDARD
+  pinMode(BUTTON_PREMIUM_PIN, INPUT_PULLUP);  // PREMIUM
+  
+  // Treatment Relay pins
+  pinMode(RELAY_BASIC_PIN, OUTPUT);
+  pinMode(RELAY_STANDARD_PIN, OUTPUT);
+  pinMode(RELAY_PREMIUM_PIN, OUTPUT);
+  
+  // LED Mirror Relay pins
+  pinMode(LED_BASIC_PIN, OUTPUT);
+  pinMode(LED_STANDARD_PIN, OUTPUT);
+  pinMode(LED_PREMIUM_PIN, OUTPUT);
+  
+  // Initialize all relays to OFF state
+  digitalWrite(RELAY_BASIC_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(RELAY_STANDARD_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(RELAY_PREMIUM_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(LED_BASIC_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(LED_STANDARD_PIN, RELAY_OFF_LEVEL);
+  digitalWrite(LED_PREMIUM_PIN, RELAY_OFF_LEVEL);
 
   // RTC setup
   if (g_rtc.begin()) {
@@ -1126,6 +1496,7 @@ void setup(){
     }
   } else { 
     Serial.println("❌ WIFI: STA failed, AP-only active");
+    wifiStats.disconnections++; // Track disconnection events
     Serial.print("📡 WIFI: Final status: ");
     wl_status_t status = WiFi.status();
     switch(status) {
@@ -1151,9 +1522,9 @@ void setup(){
 
 void loop(){
   // Buttons → actions
-  bool b = digitalRead(BUTTON_UP_PIN) == LOW;
-  bool s = digitalRead(BUTTON_DOWN_PIN) == LOW;
-  bool p = digitalRead(BUTTON_SELECT_PIN) == LOW;
+  bool b = digitalRead(BUTTON_BASIC_PIN) == LOW;
+  bool s = digitalRead(BUTTON_STANDARD_PIN) == LOW;
+  bool p = digitalRead(BUTTON_PREMIUM_PIN) == LOW;
   
   if (b && !btnBLast) { startTimer(Treatment::Basic); }
   if (s && !btnSLast) { startTimer(Treatment::Standard); }
@@ -1175,6 +1546,32 @@ void loop(){
   if (active!=Treatment::None) { uint32_t elapsed=(uint32_t)(millis()-activeStartMs); if (elapsed>=activeDurationMs) stopTreatment(); else if (elapsed%1000<50) drawTimer(); }
 
   if (WiFi.status()==WL_CONNECTED) {
+    // Monitor connection quality periodically
+    uint32_t now = millis();
+    if (now - lastConnectionCheck >= 10000) { // Every 10 seconds
+      monitorConnectionQuality();
+      lastConnectionCheck = now;
+    }
+    
+    // Perform ping tests for packet loss detection
+    if (now - lastPingTest >= 30000) { // Every 30 seconds
+      uint32_t latency = performPingTest();
+      if (latency > 0) {
+        Serial.print("🏓 PING: ");
+        Serial.print(latency);
+        Serial.println("ms");
+      } else {
+        Serial.println("🏓 PING: Failed");
+      }
+      lastPingTest = now;
+    }
+    
+    // Update connection quality score
+    if (now - lastStatsUpdate >= 60000) { // Every 60 seconds
+      updateConnectionQualityScore();
+      lastStatsUpdate = now;
+    }
+    
     if (deviceId.length()==0 || deviceToken.length()==0) { 
       Serial.println("🔐 HANDSHAKE: Performing device handshake...");
       if (performHandshake()) {
@@ -1257,9 +1654,26 @@ void loop(){
       resetBackoff(); 
     }
   } else {
-    // WiFi not connected - show queue status periodically
-    static uint32_t lastQueueStatus = 0;
+    // WiFi not connected - attempt periodic reconnection
     uint32_t now = millis();
+    if (now - lastReconnectAttempt >= reconnectDelay) {
+      Serial.print("🔄 WIFI: Periodic reconnection attempt (");
+      Serial.print(reconnectAttempts + 1);
+      Serial.println(")");
+      
+      if (attemptWiFiReconnection()) {
+        Serial.println("✅ WIFI: Periodic reconnection successful");
+      } else {
+        Serial.print("❌ WIFI: Periodic reconnection failed, next attempt in ");
+        Serial.print(reconnectDelay / 1000);
+        Serial.println(" seconds");
+      }
+      
+      lastReconnectAttempt = now;
+    }
+    
+    // Show queue status periodically when offline
+    static uint32_t lastQueueStatus = 0;
     if (now - lastQueueStatus >= 10000) { // Every 10 seconds
       size_t qSize = queueSize();
       size_t cmdSize = commandQueueSize();
@@ -1268,7 +1682,9 @@ void loop(){
         Serial.print(qSize);
         Serial.print(" bytes, Command queue: ");
         Serial.print(cmdSize);
-        Serial.println(" bytes pending");
+        Serial.print(" bytes pending | Next reconnect in: ");
+        Serial.print((reconnectDelay - (now - lastReconnectAttempt)) / 1000);
+        Serial.println("s");
       }
       lastQueueStatus = now;
     }
