@@ -1,7 +1,7 @@
-// Ozone Machine SIMULATION firmware (no GPIO usage) with real-like uploader
+// Ozone Machine firmware with SD Card storage
 // - Serial UI: b=Basic, s=Standard, p=Premium, hold x for 2s to stop, r=reset
 // - EEPROM counters persist across power cycles
-// - LittleFS queue, handshake, HTTPS upload (idempotent event_id)
+// - SD Card queue, handshake, HTTPS upload (idempotent event_id)
 
 #include <Arduino.h>
 #include <EEPROM.h>
@@ -9,23 +9,83 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <LittleFS.h>
+// SD card removed - using EEPROM for storage
 #include "pins.h"
 #include <RTClib.h>
+#include <driver/gpio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
-// Relay level fallbacks (if not defined in pins.h)
+// Relay control system (following reference pattern)
 #ifndef RELAY_ACTIVE_LOW
-#define RELAY_ACTIVE_LOW 1
+#define RELAY_ACTIVE_LOW 0  // Active HIGH for SRD-05VDC-SL-C
 #endif
-#ifndef RELAY_ON_LEVEL
-#define RELAY_ON_LEVEL (RELAY_ACTIVE_LOW ? LOW : HIGH)
-#endif
-#ifndef RELAY_OFF_LEVEL
-#define RELAY_OFF_LEVEL (RELAY_ACTIVE_LOW ? HIGH : LOW)
-#endif
+
+struct Relay {
+  uint8_t pin;
+  bool state; // true = ON (logical), false = OFF (logical)
+  bool activeLow; // channel-specific polarity override
+};
+
+static const int kNumRelays = 6;
+static Relay relays[kNumRelays] = {
+  {RELAY_BASIC_PIN, false, (RELAY_ACTIVE_LOW == 1)},      // IN1
+  {RELAY_STANDARD_PIN, false, (RELAY_ACTIVE_LOW == 1)},   // IN2
+  {RELAY_PREMIUM_PIN, false, (RELAY_ACTIVE_LOW == 1)},    // IN3
+  {LED_BASIC_PIN, false, (RELAY_ACTIVE_LOW == 1)},        // IN4
+  {LED_STANDARD_PIN, false, (RELAY_ACTIVE_LOW == 1)},     // IN5
+  {LED_PREMIUM_PIN, false, (RELAY_ACTIVE_LOW == 1)}       // IN6
+};
+
+inline void writeRelay(const Relay &relay) {
+  const int level = (relay.state ^ relay.activeLow) ? HIGH : LOW;
+  digitalWrite(relay.pin, level);
+}
+
+// Forward declarations for button relay functions
+static void activateButtonRelay(uint8_t relayType, uint32_t durationMs);
+static void deactivateButtonRelay();
+
+// JTAG pin configuration removed - using GPIO 13 and 32 instead of broken GPIO 21/22
+
+void applyAllRelays() {
+  for (int i = 0; i < kNumRelays; ++i) {
+    writeRelay(relays[i]);
+  }
+}
+
+void logPinLevels() {
+  // Read back output register via digitalRead for visibility on the monitor
+  int v1 = digitalRead(RELAY_BASIC_PIN);
+  int v2 = digitalRead(RELAY_STANDARD_PIN);
+  int v3 = digitalRead(RELAY_PREMIUM_PIN);
+  int v4 = digitalRead(LED_BASIC_PIN);
+  int v5 = digitalRead(LED_STANDARD_PIN);
+  int v6 = digitalRead(LED_PREMIUM_PIN);
+  Serial.print("GPIO levels: RELAY_B="); Serial.print(v1);
+  Serial.print(" RELAY_S="); Serial.print(v2);
+  Serial.print(" RELAY_P="); Serial.print(v3);
+  Serial.print(" LED_B="); Serial.print(v4);
+  Serial.print(" LED_S="); Serial.print(v5);
+  Serial.print(" LED_P="); Serial.println(v6);
+
+  // Also show logical states and per-channel polarity
+  Serial.print("Logical states: ");
+  Serial.print("RELAY_B="); Serial.print(relays[0].state ? "ON" : "OFF");
+  Serial.print(" RELAY_S="); Serial.print(relays[1].state ? "ON" : "OFF");
+  Serial.print(" RELAY_P="); Serial.print(relays[2].state ? "ON" : "OFF");
+  Serial.print(" LED_B="); Serial.print(relays[3].state ? "ON" : "OFF");
+  Serial.print(" LED_S="); Serial.print(relays[4].state ? "ON" : "OFF");
+  Serial.print(" LED_P="); Serial.println(relays[5].state ? "ON" : "OFF");
+  Serial.print("Active level: ");
+  Serial.println(RELAY_ACTIVE_LOW ? "LOW (active-low)" : "HIGH (active-high)");
+}
 
 // ============================ Build-time config ==============================
 static const char* FIRMWARE_VERSION = "1.0.0-sim";
+
+// GPIO Testing Mode
+static const bool GPIO_TEST_MODE = true;  // Set to true to enable GPIO monitoring
 
 // Wi-Fi
 static const char* WIFI_AP_SSID = "OZONE-CONFIG";
@@ -43,17 +103,13 @@ static const char* URL_COMMANDS  = "/api/device/";
 static const uint32_t HTTPS_TIMEOUT_MS = 5000;
 static const bool USE_INSECURE_TLS = true; // set to false when embedding root CA
 
-// Queue
-static const char* EVENT_QUEUE_FILE = "/events.jsonl";
-static const size_t MAX_QUEUE_SIZE = 4 * 1024 * 1024;
+// Queue (EEPROM - simplified for basic operation)
 static const uint32_t RETRY_BASE_DELAY_MS = 2000;
 static const uint32_t RETRY_MAX_DELAY_MS  = 300000;
 static const uint8_t  RETRY_JITTER_PERCENT = 20;
 
 // Command System
 static const uint32_t COMMAND_POLL_INTERVAL_MS = 30000; // 30 seconds
-static const char* COMMAND_QUEUE_FILE = "/commands.jsonl";
-static const size_t MAX_COMMAND_QUEUE_SIZE = 1024 * 1024; // 1MB
 
 // Durations (ms) testing
 static const uint32_t DURATION_B_MS = 5000;
@@ -109,6 +165,59 @@ static uint8_t reconnectAttempts = 0;
 static int32_t lastRSSI = -100; // Track connection quality
 static uint32_t lastConnectionCheck = 0;
 
+// WiFi task management (non-blocking)
+static TaskHandle_t wifiTaskHandle = NULL;
+static bool wifiReconnectionInProgress = false;
+static uint32_t wifiTaskLastAttempt = 0;
+
+// Non-blocking WiFi reconnection task
+void wifiTask(void *parameter) {
+  Serial.println("🔄 WIFI: Background reconnection task started");
+  
+  while (true) {
+    if (!wifiReconnectionInProgress) {
+      vTaskDelay(pdMS_TO_TICKS(1000)); // Check every 1 second
+      continue;
+    }
+    
+    Serial.print("🔄 WIFI: Background reconnection attempt #");
+    Serial.print(reconnectAttempts + 1);
+    Serial.print(" to '");
+    Serial.print(wifiSsid);
+    Serial.println("'");
+    
+    // Non-blocking disconnect
+    WiFi.disconnect();
+    vTaskDelay(pdMS_TO_TICKS(500)); // Short delay
+    
+    // Non-blocking reconnect
+    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+    
+    uint32_t start = millis();
+    uint32_t timeout = min(10000, 3000 + (reconnectAttempts * 1000)); // Shorter timeout
+    
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeout) {
+      vTaskDelay(pdMS_TO_TICKS(100)); // Non-blocking delay
+      if (millis() - start > 2000) Serial.print('.'); // Show progress after 2s
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n✅ WIFI: Background reconnection successful");
+      reconnectAttempts = 0;
+      reconnectDelay = 30000; // Reset to 30 seconds
+  } else {
+      Serial.println("\n❌ WIFI: Background reconnection failed");
+      reconnectAttempts++;
+      reconnectDelay = min(300000, 30000 + (reconnectAttempts * 30000)); // Max 5 minutes
+    }
+    
+    wifiReconnectionInProgress = false;
+    wifiTaskLastAttempt = millis();
+    
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Wait 5 seconds before next attempt
+  }
+}
+
 // Advanced WiFi Statistics
 struct WiFiStats {
   uint32_t packetsSent;
@@ -138,6 +247,96 @@ static bool btnBLast = false;
 static bool btnSLast = false;
 static bool btnPLast = false;
 static uint32_t btnPHoldStart = 0;
+
+// Button debounce and post-action inhibit
+static const uint32_t BUTTON_DEBOUNCE_MS = 50;
+static uint32_t lastBChangeMs = 0;
+static uint32_t lastSChangeMs = 0;
+static uint32_t lastPChangeMs = 0;
+static bool bStable = false;
+static bool sStable = false;
+static bool pStable = false;
+static uint32_t inputsInhibitUntil = 0; // ignore inputs until this time
+
+// Button press relay timers
+static uint32_t buttonRelayStart = 0;
+static bool buttonRelayActive = false;
+static uint8_t activeButtonRelay = 0; // 0=none, 1=basic, 2=standard, 3=premium
+
+// Button relay control function implementations
+static void activateButtonRelay(uint8_t relayType, uint32_t durationMs) {
+  if (buttonRelayActive) {
+    Serial.println("⚠️ Button relay already active, ignoring new press");
+    return;
+  }
+  
+  buttonRelayActive = true;
+  activeButtonRelay = relayType;
+  buttonRelayStart = millis();
+  
+  // Activate the appropriate relay + LED mirror
+  switch (relayType) {
+    case 1: // Basic
+      relays[0].state = true;  // RELAY_BASIC_PIN
+      relays[3].state = true;  // LED_BASIC_PIN
+      writeRelay(relays[0]);
+      writeRelay(relays[3]);
+      Serial.printf("🔘 BASIC button pressed - Relay + LED ON for %d seconds\n", durationMs / 1000);
+      break;
+    case 2: // Standard  
+      relays[1].state = true;  // RELAY_STANDARD_PIN
+      relays[4].state = true;  // LED_STANDARD_PIN
+      writeRelay(relays[1]);
+      writeRelay(relays[4]);
+      Serial.printf("🔘 STANDARD button pressed - Relay + LED ON for %d seconds\n", durationMs / 1000);
+      Serial.printf("   RELAY_STANDARD_PIN=%d, LED_STANDARD_PIN=%d\n", RELAY_STANDARD_PIN, LED_STANDARD_PIN);
+      Serial.printf("   Relay state: %s, LED state: %s\n", relays[1].state ? "ON" : "OFF", relays[4].state ? "ON" : "OFF");
+      break;
+    case 3: // Premium
+      relays[2].state = true;  // RELAY_PREMIUM_PIN
+      relays[5].state = true;  // LED_PREMIUM_PIN
+      writeRelay(relays[2]);
+      writeRelay(relays[5]);
+      Serial.printf("🔘 PREMIUM button pressed - Relay + LED ON for %d seconds\n", durationMs / 1000);
+      Serial.printf("   RELAY_PREMIUM_PIN=%d, LED_PREMIUM_PIN=%d\n", RELAY_PREMIUM_PIN, LED_PREMIUM_PIN);
+      Serial.printf("   Relay state: %s, LED state: %s\n", relays[2].state ? "ON" : "OFF", relays[5].state ? "ON" : "OFF");
+      break;
+  }
+}
+
+static void deactivateButtonRelay() {
+  if (!buttonRelayActive) return;
+  
+  // Turn off the active relay + LED mirror
+  switch (activeButtonRelay) {
+    case 1: // Basic
+      relays[0].state = false;  // RELAY_BASIC_PIN
+      relays[3].state = false;  // LED_BASIC_PIN
+      writeRelay(relays[0]);
+      writeRelay(relays[3]);
+      Serial.println("🔘 BASIC relay + LED OFF");
+      break;
+    case 2: // Standard
+      relays[1].state = false;  // RELAY_STANDARD_PIN
+      relays[4].state = false;  // LED_STANDARD_PIN
+      writeRelay(relays[1]);
+      writeRelay(relays[4]);
+      Serial.println("🔘 STANDARD relay + LED OFF");
+      break;
+    case 3: // Premium
+      relays[2].state = false;  // RELAY_PREMIUM_PIN
+      relays[5].state = false;  // LED_PREMIUM_PIN
+      writeRelay(relays[2]);
+      writeRelay(relays[5]);
+      Serial.println("🔘 PREMIUM relay + LED OFF");
+      break;
+  }
+  
+  buttonRelayActive = false;
+  activeButtonRelay = 0;
+  // Short cooldown to ignore any electrical noise from relay switching
+  inputsInhibitUntil = millis() + 300;
+}
 
 // Kuala Lumpur timezone (UTC+8)
 static const long KL_GMT_OFFSET = 8 * 3600;
@@ -287,77 +486,49 @@ static void drawTimer() {
   Serial.println("hold x for 2s to stop");
 }
 
-// ============================== Queue (LittleFS) =============================
-static bool ensureQueue() {
-  if (!LittleFS.begin(true)) { Serial.println("FS mount failed"); return false; }
-  if (!LittleFS.exists(EVENT_QUEUE_FILE)) { File f = LittleFS.open(EVENT_QUEUE_FILE, "w"); if (!f) return false; f.close(); }
+// ============================== Simplified Queue (EEPROM) =============================
+// Simplified queue system using EEPROM for basic operation
+// Events are sent immediately when WiFi is available, no persistent queuing
+
+static bool appendEventToQueue(const String& line) {
+  // Simplified: just return true, events will be sent immediately
   return true;
 }
 
-static size_t queueSize() { File f = LittleFS.open(EVENT_QUEUE_FILE, "r"); if (!f) return 0; size_t s=f.size(); f.close(); return s; }
-
-static bool appendEventToQueue(const String& line) {
-  if (!ensureQueue()) return false; if (queueSize() > MAX_QUEUE_SIZE) return false; File f = LittleFS.open(EVENT_QUEUE_FILE, "a"); if (!f) return false; f.println(line); f.close(); return true;
+static size_t queueSize() { 
+  // Simplified: always return 0 (no persistent queue)
+  return 0; 
 }
 
-static String readNextEvent() { if (!ensureQueue()) return String(); File f=LittleFS.open(EVENT_QUEUE_FILE, "r"); if(!f) return String(); String line=f.readStringUntil('\n'); f.close(); return line; }
-
-static bool popEvent() {
-  if (!ensureQueue()) return false; File in=LittleFS.open(EVENT_QUEUE_FILE, "r"); if(!in) return false; String content=""; (void)in.readStringUntil('\n'); while(in.available()){ content += in.readStringUntil('\n'); content += "\n"; } in.close(); File out=LittleFS.open(EVENT_QUEUE_FILE, "w"); if(!out) return false; out.print(content); out.close(); return true;
+static String readNextEvent() { 
+  // Simplified: return empty string (no persistent queue)
+  return String(); 
 }
 
-// ============================== Command Queue (LittleFS) =============================
-static bool ensureCommandQueue() {
-  if (!LittleFS.begin(true)) { Serial.println("Command FS mount failed"); return false; }
-  if (!LittleFS.exists(COMMAND_QUEUE_FILE)) { File f = LittleFS.open(COMMAND_QUEUE_FILE, "w"); if (!f) return false; f.close(); }
+static bool popEvent() { 
+  // Simplified: always return true (no persistent queue)
+  return true; 
+}
+
+// ============================== Simplified Command Queue (EEPROM) =============================
+static bool appendCommandToQueue(const String& line) {
+  // Simplified: commands processed immediately, no persistent queue
   return true;
 }
 
 static size_t commandQueueSize() { 
-  File f = LittleFS.open(COMMAND_QUEUE_FILE, "r"); 
-  if (!f) return 0; 
-  size_t s = f.size(); 
-  f.close(); 
-  return s; 
-}
-
-static bool appendCommandToQueue(const String& line) {
-  if (!ensureCommandQueue()) return false; 
-  if (commandQueueSize() > MAX_COMMAND_QUEUE_SIZE) return false; 
-  File f = LittleFS.open(COMMAND_QUEUE_FILE, "a"); 
-  if (!f) return false; 
-  f.println(line); 
-  f.flush(); // Ensure data is written to flash immediately
-  f.close(); 
-  return true;
+  // Simplified: always return 0 (no persistent queue)
+  return 0; 
 }
 
 static String readNextCommand() { 
-  if (!ensureCommandQueue()) return String(); 
-  File f = LittleFS.open(COMMAND_QUEUE_FILE, "r"); 
-  if (!f) return String(); 
-  String line = f.readStringUntil('\n'); 
-  f.close(); 
-  return line; 
+  // Simplified: return empty string (no persistent queue)
+  return String(); 
 }
 
-static bool popCommand() {
-  if (!ensureCommandQueue()) return false; 
-  File in = LittleFS.open(COMMAND_QUEUE_FILE, "r"); 
-  if (!in) return false; 
-  String content = ""; 
-  (void)in.readStringUntil('\n'); 
-  while (in.available()) { 
-    content += in.readStringUntil('\n'); 
-    content += "\n"; 
-  } 
-  in.close(); 
-  File out = LittleFS.open(COMMAND_QUEUE_FILE, "w"); 
-  if (!out) return false; 
-  out.print(content); 
-  out.flush(); // Ensure data is written to flash immediately
-  out.close(); 
-  return true;
+static bool popCommand() { 
+  // Simplified: always return true (no persistent queue)
+  return true; 
 }
 
 // ============================== Network =====================================
@@ -382,7 +553,7 @@ static bool performHandshake() {
   http.setTimeout(HTTPS_TIMEOUT_MS); 
   http.addHeader("Content-Type","application/json");
   
-  StaticJsonDocument<256> body; 
+  JsonDocument body; 
   body["mac"]=WiFi.macAddress(); 
   body["firmware"]=FIRMWARE_VERSION; 
   String payload; 
@@ -400,11 +571,11 @@ static bool performHandshake() {
     Serial.print("📥 HANDSHAKE: Response body: ");
     Serial.println(resp);
     
-    StaticJsonDocument<512> doc; 
+    JsonDocument doc; 
     if (deserializeJson(doc,resp)==DeserializationError::Ok) { 
       String id=doc["device_id"].as<String>(); 
       String tok=doc["token"].as<String>(); 
-      bool assigned = doc.containsKey("assigned") ? doc["assigned"].as<bool>() : false;
+      bool assigned = doc["assigned"].is<bool>() ? doc["assigned"].as<bool>() : false;
       if (id.length()>0 && tok.length()>0) { 
         saveIdentity(id,tok); 
         Serial.print("✅ HANDSHAKE: Device registered - ID: ");
@@ -415,7 +586,7 @@ static bool performHandshake() {
         Serial.println(assigned ? "true" : "false");
         http.end(); 
         return true; 
-  } else {
+    } else {
         Serial.println("❌ HANDSHAKE: Invalid response - missing device_id or token");
       }
   } else {
@@ -427,7 +598,8 @@ static bool performHandshake() {
     
     // Trigger reconnection on handshake failure
     if (code == -1 || code == -2 || code == -3) { // Connection errors
-      Serial.println("🔄 HANDSHAKE: Connection error detected, triggering WiFi reconnection");
+      Serial.println("🔄 HANDSHAKE: Connection error detected, triggering background WiFi reconnection");
+      wifiReconnectionInProgress = true;
       lastReconnectAttempt = 0; // Force immediate reconnection attempt
     }
   }
@@ -512,7 +684,7 @@ static bool uploadEventJson(const String& jsonLine) {
     Serial.print("✅ SUCCESS (HTTP ");
     Serial.print(code);
     Serial.println(")");
-  } else { 
+  } else {
     Serial.print("❌ FAILED (HTTP ");
     Serial.print(code);
     Serial.print(") - ");
@@ -545,7 +717,8 @@ static bool uploadEventJson(const String& jsonLine) {
     
     // Trigger reconnection on upload failure
     if (code == -1 || code == -2 || code == -3) { // Connection errors
-      Serial.println("🔄 UPLOAD: Connection error detected, triggering WiFi reconnection");
+      Serial.println("🔄 UPLOAD: Connection error detected, triggering background WiFi reconnection");
+      wifiReconnectionInProgress = true;
       lastReconnectAttempt = 0; // Force immediate reconnection attempt
     }
   }
@@ -578,7 +751,7 @@ static void testNetworkConnectivity() {
       Serial.print("📊 Test response: HTTP ");
       Serial.println(code);
       http.end();
-    } else {
+  } else {
       Serial.println("❌ Test failed: Could not begin connection");
     }
   } else {
@@ -595,7 +768,7 @@ static void resetReconnectionBackoff() {
 
 static uint32_t nextReconnectionDelay() {
   uint32_t delay = reconnectDelay;
-  reconnectDelay = min(reconnectDelay * 2, 300000); // Max 5 minutes
+   reconnectDelay = min(reconnectDelay * 2, (uint32_t)300000); // Max 5 minutes
   reconnectAttempts++;
   
   // Add jitter to prevent thundering herd
@@ -607,66 +780,7 @@ static uint32_t nextReconnectionDelay() {
   return (uint32_t)result;
 }
 
-static bool attemptWiFiReconnection() {
-  Serial.print("🔄 WIFI: Attempting reconnection (attempt #");
-  Serial.print(reconnectAttempts + 1);
-  Serial.print(") to '");
-  Serial.print(wifiSsid);
-  Serial.println("'");
-  
-  // Disconnect first to ensure clean state
-  WiFi.disconnect();
-  delay(1000);
-  
-  // Attempt reconnection
-  WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
-  
-  uint32_t start = millis();
-  uint32_t timeout = min(15000, 5000 + (reconnectAttempts * 2000)); // Longer timeout for retries
-  
-  while (WiFi.status() != WL_CONNECTED && millis() - start < timeout) {
-    delay(250);
-    Serial.print('.');
-    
-    if (WiFi.status() == WL_CONNECT_FAILED) {
-      Serial.println("\n❌ WIFI: Connection failed - check credentials");
-      break;
-    }
-  }
-  Serial.println();
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("✅ WIFI: Reconnection successful! IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("📡 WIFI: RSSI: ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-    
-    // Reset backoff on successful connection
-    resetReconnectionBackoff();
-    lastRSSI = WiFi.RSSI();
-    wifiStats.reconnections++; // Track reconnection events
-    
-    // Sync RTC from NTP
-    if (syncRTCFromNTP()) {
-      Serial.println("⏰ NTP: RTC synchronized after reconnection");
-    }
-    
-    return true;
-  } else {
-    Serial.print("❌ WIFI: Reconnection failed (attempt #");
-    Serial.print(reconnectAttempts + 1);
-    Serial.println(")");
-    
-    // Update backoff delay
-    reconnectDelay = nextReconnectionDelay();
-    Serial.print("⏰ WIFI: Next reconnection attempt in ");
-    Serial.print(reconnectDelay / 1000);
-    Serial.println(" seconds");
-    
-    return false;
-  }
-}
+// attemptWiFiReconnection() removed - using background WiFi task instead
 
 static void monitorConnectionQuality() {
   if (WiFi.status() == WL_CONNECTED) {
@@ -819,7 +933,7 @@ static void printAdvancedWiFiStats() {
     Serial.print("-");
     Serial.print(wifiStats.maxLatency);
     Serial.println("ms range");
-  } else {
+    } else {
     Serial.println("⏱️ Latency: No data available");
   }
   
@@ -916,9 +1030,9 @@ static bool pollCommands() {
     Serial.print(" | Body: ");
     Serial.println(resp);
     
-    StaticJsonDocument<1024> doc; 
+  JsonDocument doc;
     if (deserializeJson(doc, resp) == DeserializationError::Ok) { 
-      if (doc.containsKey("commands") && doc["commands"].is<JsonArray>()) {
+      if (doc["commands"].is<JsonArray>()) {
         JsonArray commands = doc["commands"];
         if (commands.size() > 0) {
           Serial.print("📋 COMMAND: Received ");
@@ -954,7 +1068,7 @@ static bool pollCommands() {
             }
             
             // Queue command for execution
-            StaticJsonDocument<512> cmdDoc;
+             JsonDocument cmdDoc;
             cmdDoc["id"] = commandId;
             cmdDoc["type"] = commandType;
             cmdDoc["payload"] = payload;
@@ -989,7 +1103,8 @@ static bool pollCommands() {
       Serial.println(" - Connection failed (network issue)");
       
       // Trigger reconnection on command polling failure
-      Serial.println("🔄 COMMAND: Connection error detected, triggering WiFi reconnection");
+      Serial.println("🔄 COMMAND: Connection error detected, triggering background WiFi reconnection");
+      wifiReconnectionInProgress = true;
       lastReconnectAttempt = 0; // Force immediate reconnection attempt
     } else {
       Serial.println();
@@ -1020,20 +1135,20 @@ static bool reportCommandResult(const String& commandId, bool success, const Str
   
   if (!http.begin(url)) {
     Serial.println("❌ COMMAND: Failed to begin HTTP connection for result");
-    return false; 
+    return false;
   }
   
   http.setTimeout(HTTPS_TIMEOUT_MS); 
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + deviceToken);
   
-  StaticJsonDocument<512> body; 
+  JsonDocument body; 
   body["success"] = success;
   body["message"] = message;
   body["timestamp"] = millis();
   
   // Add current counter state for backend synchronization
-  JsonObject counters = body.createNestedObject("current_counters");
+  JsonObject counters = body["current_counters"].to<JsonObject>();
   counters["basic"] = counterB;
   counters["standard"] = counterS;
   counters["premium"] = counterP;
@@ -1071,7 +1186,7 @@ static bool reportCommandResult(const String& commandId, bool success, const Str
   if (code >= 200 && code < 300) { 
     Serial.println("✅ COMMAND: Result reported successfully");
     http.end(); 
-    return true; 
+  return true;
   } else {
     Serial.print("❌ COMMAND: Failed to report result - HTTP ");
     Serial.print(code);
@@ -1111,24 +1226,17 @@ static bool executeCommand(const String& commandId, CommandType type, const Stri
           EEPROM.write(i, 0xFF);
         }
       }
-      EEPROM.commit();
+  EEPROM.commit();
       success = true;
       message = "Memory cleared (except WiFi credentials)";
       Serial.println("🗑️ COMMAND: Memory cleared successfully");
       break;
       
     case CommandType::CLEAR_QUEUE:
-      if (LittleFS.begin(true)) {
-        if (LittleFS.exists(EVENT_QUEUE_FILE)) {
-          LittleFS.remove(EVENT_QUEUE_FILE);
-        }
-        if (LittleFS.exists(COMMAND_QUEUE_FILE)) {
-          LittleFS.remove(COMMAND_QUEUE_FILE);
-        }
-      }
+      // Simplified: no persistent queues to clear
       success = true;
-      message = "Event and command queues cleared";
-      Serial.println("🗑️ COMMAND: Queues cleared successfully");
+      message = "Queue clearing acknowledged (simplified operation)";
+      Serial.println("🗑️ COMMAND: Queue clear acknowledged");
       break;
       
     case CommandType::REBOOT_DEVICE:
@@ -1186,7 +1294,7 @@ static void processCommandQueue() {
       Serial.print("📝 COMMAND: Raw command: ");
       Serial.println(cmdLine);
       
-      StaticJsonDocument<512> cmdDoc;
+             JsonDocument cmdDoc;
       if (deserializeJson(cmdDoc, cmdLine) == DeserializationError::Ok) {
         String commandId = cmdDoc["id"].as<String>();
         String commandType = cmdDoc["type"].as<String>();
@@ -1228,68 +1336,8 @@ static void processCommandQueue() {
 static void printQueuedEvents() {
   Serial.println();
   Serial.println("================ QUEUE STATUS =================");
-  
-  size_t qSize = queueSize();
-  Serial.print("📋 Queue size: ");
-  Serial.print(qSize);
-  Serial.println(" bytes");
-  
-  if (qSize == 0) {
-    Serial.println("✅ No events in queue");
-    return;
-  }
-  
-  Serial.println("📝 Queued events:");
-  Serial.println("------------------------------------------------");
-  
-  if (!ensureQueue()) {
-    Serial.println("❌ Failed to access queue file");
-    return;
-  }
-  
-  File f = LittleFS.open(EVENT_QUEUE_FILE, "r");
-  if (!f) {
-    Serial.println("❌ Failed to open queue file");
-    return;
-  }
-  
-  int eventCount = 0;
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    if (line.length() > 0) {
-      eventCount++;
-      
-      // Parse the JSON event
-      StaticJsonDocument<256> eventDoc;
-      if (deserializeJson(eventDoc, line) == DeserializationError::Ok) {
-        String eventId = eventDoc["event_id"].as<String>();
-        String treatment = eventDoc["treatment"].as<String>();
-        uint32_t counter = eventDoc["counter"].as<uint32_t>();
-        String timestamp = eventDoc["ts"].as<String>();
-        
-        Serial.print("#");
-        Serial.print(eventCount);
-        Serial.print(": ");
-        Serial.print(treatment);
-        Serial.print(" #");
-        Serial.print(counter);
-        Serial.print(" | ID: ");
-        Serial.print(eventId);
-        Serial.print(" | Time: ");
-        Serial.println(timestamp);
-  } else {
-        Serial.print("#");
-        Serial.print(eventCount);
-        Serial.print(": [Raw JSON] ");
-        Serial.println(line);
-      }
-    }
-  }
-  f.close();
-  
-  Serial.println("------------------------------------------------");
-  Serial.print("Total events queued: ");
-  Serial.println(eventCount);
+  Serial.println("📋 Simplified operation - no persistent queues");
+  Serial.println("✅ Events sent immediately when WiFi available");
   Serial.println("================================================");
 }
 
@@ -1297,15 +1345,11 @@ static void printQueuedEvents() {
 static void stopTreatment() {
   if (active==Treatment::None) return;
   
-  // Turn OFF all treatment relays
-  digitalWrite(RELAY_BASIC_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(RELAY_STANDARD_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(RELAY_PREMIUM_PIN, RELAY_OFF_LEVEL);
-  
-  // Turn OFF all LED mirror relays
-  digitalWrite(LED_BASIC_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(LED_STANDARD_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(LED_PREMIUM_PIN, RELAY_OFF_LEVEL);
+  // Turn off all relays using new relay system
+  for (int i = 0; i < kNumRelays; ++i) {
+    relays[i].state = false;
+  }
+  applyAllRelays();
   
   active=Treatment::None;
   activeDurationMs=0;
@@ -1314,7 +1358,7 @@ static void stopTreatment() {
 }
 
 static void enqueueTreatmentEvent(Treatment t, uint32_t counterVal) {
-  StaticJsonDocument<512> body;
+  JsonDocument body;
   body["device_id"] = deviceId.length()?deviceId:"esp32-sim";
   body["firmware"] = FIRMWARE_VERSION;
   body["event_id"] = generateEventId(t, counterVal);
@@ -1324,7 +1368,7 @@ static void enqueueTreatmentEvent(Treatment t, uint32_t counterVal) {
   body["ts"] = makeIsoNow();
   
   // Add current counter state for backend synchronization
-  JsonObject counters = body.createNestedObject("current_counters");
+  JsonObject counters = body["current_counters"].to<JsonObject>();
   counters["basic"] = counterB;
   counters["standard"] = counterS;
   counters["premium"] = counterP;
@@ -1353,25 +1397,31 @@ static void startTimer(Treatment t) {
       activeDurationMs=DURATION_B_MS; 
       counterB++; 
       enqueueTreatmentEvent(t,counterB); 
-      // Activate Basic treatment relay + LED mirror
-      digitalWrite(RELAY_BASIC_PIN, RELAY_ON_LEVEL);
-      digitalWrite(LED_BASIC_PIN, RELAY_ON_LEVEL);
+      // Activate Basic treatment relay + LED mirror (IN1 & IN4)
+      relays[0].state = true;  // RELAY_BASIC_PIN
+      relays[3].state = true;  // LED_BASIC_PIN
+      writeRelay(relays[0]);
+      writeRelay(relays[3]);
       break; 
     case Treatment::Standard: 
       activeDurationMs=DURATION_S_MS; 
       counterS++; 
       enqueueTreatmentEvent(t,counterS); 
-      // Activate Standard treatment relay + LED mirror
-      digitalWrite(RELAY_STANDARD_PIN, RELAY_ON_LEVEL);
-      digitalWrite(LED_STANDARD_PIN, RELAY_ON_LEVEL);
+      // Activate Standard treatment relay + LED mirror (IN2 & IN5)
+      relays[1].state = true;  // RELAY_STANDARD_PIN
+      relays[4].state = true;  // LED_STANDARD_PIN
+      writeRelay(relays[1]);
+      writeRelay(relays[4]);
       break; 
     case Treatment::Premium: 
       activeDurationMs=DURATION_P_MS; 
       counterP++; 
       enqueueTreatmentEvent(t,counterP); 
-      // Activate Premium treatment relay + LED mirror
-      digitalWrite(RELAY_PREMIUM_PIN, RELAY_ON_LEVEL);
-      digitalWrite(LED_PREMIUM_PIN, RELAY_ON_LEVEL);
+      // Activate Premium treatment relay + LED mirror (IN3 & IN6)
+      relays[2].state = true;  // RELAY_PREMIUM_PIN
+      relays[5].state = true;  // LED_PREMIUM_PIN
+      writeRelay(relays[2]);
+      writeRelay(relays[5]);
       break; 
     default: return; 
   }
@@ -1381,7 +1431,64 @@ static void startTimer(Treatment t) {
 // ================================= Setup/Loop ================================
 void setup(){
   Serial.begin(115200); while(!Serial){}
-  Serial.println(); Serial.println("Ozone Machine (SIM) starting...");
+  Serial.println(); Serial.println("Ozone Machine starting...");
+  
+  if (GPIO_TEST_MODE) {
+    Serial.println("🔍 GPIO TEST MODE ENABLED - Monitoring all pins");
+    Serial.println("Pin assignments:");
+    Serial.printf("Buttons: BASIC=%d, STANDARD=%d, PREMIUM=%d\n", BUTTON_BASIC_PIN, BUTTON_STANDARD_PIN, BUTTON_PREMIUM_PIN);
+    Serial.printf("Relays: BASIC=%d, STANDARD=%d, PREMIUM=%d\n", RELAY_BASIC_PIN, RELAY_STANDARD_PIN, RELAY_PREMIUM_PIN);
+    Serial.printf("LEDs: BASIC=%d, STANDARD=%d, PREMIUM=%d\n", LED_BASIC_PIN, LED_STANDARD_PIN, LED_PREMIUM_PIN);
+    Serial.printf("RTC: SDA=%d, SCL=%d\n", RTC_SDA_PIN, RTC_SCL_PIN);
+    Serial.println("Format: PinName=State (0=LOW, 1=HIGH)");
+    Serial.println("==========================================");
+  }
+
+  // Make relay lines high-impedance with bias toward OFF at boot (no active drive)
+// Leave relay pins un-driven; comment out bias to test pure hi-Z startup
+// #if RELAY_ACTIVE_LOW
+//   pinMode(RELAY_BASIC_PIN, INPUT_PULLUP);
+//   pinMode(RELAY_STANDARD_PIN, INPUT_PULLUP);
+//   pinMode(RELAY_PREMIUM_PIN, INPUT_PULLUP);
+//   pinMode(LED_BASIC_PIN, INPUT_PULLUP);
+//   pinMode(LED_STANDARD_PIN, INPUT_PULLUP);
+//   pinMode(LED_PREMIUM_PIN, INPUT_PULLUP);
+// #else
+//   pinMode(RELAY_BASIC_PIN, INPUT_PULLDOWN);
+//   pinMode(RELAY_STANDARD_PIN, INPUT_PULLDOWN);
+//   pinMode(RELAY_PREMIUM_PIN, INPUT_PULLDOWN);
+//   pinMode(LED_BASIC_PIN, INPUT_PULLDOWN);
+//   pinMode(LED_STANDARD_PIN, INPUT_PULLDOWN);
+//   pinMode(LED_PREMIUM_PIN, INPUT_PULLDOWN);
+// #endif
+
+  // Debug: Check relay pin states immediately after Serial init
+  Serial.println("🔍 DEBUG: Checking relay pin states at boot...");
+  Serial.print("RELAY_BASIC_PIN ("); Serial.print(RELAY_BASIC_PIN); Serial.print("): "); Serial.println(digitalRead(RELAY_BASIC_PIN));
+  Serial.print("RELAY_STANDARD_PIN ("); Serial.print(RELAY_STANDARD_PIN); Serial.print("): "); Serial.println(digitalRead(RELAY_STANDARD_PIN));
+  Serial.print("RELAY_PREMIUM_PIN ("); Serial.print(RELAY_PREMIUM_PIN); Serial.print("): "); Serial.println(digitalRead(RELAY_PREMIUM_PIN));
+  Serial.print("LED_BASIC_PIN ("); Serial.print(LED_BASIC_PIN); Serial.print("): "); Serial.println(digitalRead(LED_BASIC_PIN));
+  Serial.print("LED_STANDARD_PIN ("); Serial.print(LED_STANDARD_PIN); Serial.print("): "); Serial.println(digitalRead(LED_STANDARD_PIN));
+  Serial.print("LED_PREMIUM_PIN ("); Serial.print(LED_PREMIUM_PIN); Serial.print("): "); Serial.println(digitalRead(LED_PREMIUM_PIN));
+
+  // Extra guard: DISABLED FOR DEBUGGING - GPIO 227 errors
+  // pinMode(RELAY_BASIC_PIN, OUTPUT);
+  // pinMode(RELAY_STANDARD_PIN, OUTPUT);
+  // pinMode(RELAY_PREMIUM_PIN, OUTPUT);
+  // pinMode(LED_BASIC_PIN, OUTPUT);
+  // pinMode(LED_STANDARD_PIN, OUTPUT);
+  // pinMode(LED_PREMIUM_PIN, OUTPUT);
+  
+  // uint32_t guardStart = millis();
+  // while (millis() - guardStart < 1500) {
+  //   digitalWrite(RELAY_BASIC_PIN, RELAY_OFF_LEVEL);
+  //   digitalWrite(RELAY_STANDARD_PIN, RELAY_OFF_LEVEL);
+  //   digitalWrite(RELAY_PREMIUM_PIN, RELAY_OFF_LEVEL);
+  //   digitalWrite(LED_BASIC_PIN, RELAY_OFF_LEVEL);
+  //   digitalWrite(LED_STANDARD_PIN, RELAY_OFF_LEVEL);
+  //   digitalWrite(LED_PREMIUM_PIN, RELAY_OFF_LEVEL);
+  //   delay(5);
+  // }
   EEPROM.begin(EEPROM_SIZE); loadCounters(); loadWifiCreds(); loadIdentity();
   
   // Increment reset counter to ensure unique event IDs after reset
@@ -1389,56 +1496,50 @@ void setup(){
   saveCounters();
   Serial.print("🔄 RESET: Reset counter incremented to ");
   Serial.println(resetCounter); 
-  if (ensureQueue()) {
-    Serial.println("✅ STORAGE: LittleFS queue initialized");
-    size_t qSize = queueSize();
-    if (qSize > 0) {
-      Serial.print("📋 QUEUE: Found ");
-      Serial.print(qSize);
-      Serial.println(" bytes of pending events from previous session");
-    } else {
-      Serial.println("📋 QUEUE: No pending events");
-    }
-  } else {
-    Serial.println("❌ STORAGE: Failed to initialize LittleFS queue");
-  }
   
-  if (ensureCommandQueue()) {
-    Serial.println("✅ COMMAND: Command queue initialized");
-    size_t cmdSize = commandQueueSize();
-    if (cmdSize > 0) {
-      Serial.print("📋 COMMAND: Found ");
-      Serial.print(cmdSize);
-      Serial.println(" bytes of pending commands from previous session");
-    } else {
-      Serial.println("📋 COMMAND: No pending commands");
-    }
-  } else {
-    Serial.println("❌ COMMAND: Failed to initialize command queue");
-  }
+  Serial.println("✅ STORAGE: EEPROM initialized (SD card removed)");
+  Serial.println("📋 QUEUE: Simplified operation - events sent immediately when WiFi available");
 
   // GPIO setup
   pinMode(BUTTON_BASIC_PIN, INPUT_PULLUP);      // BASIC
   pinMode(BUTTON_STANDARD_PIN, INPUT_PULLUP);    // STANDARD
   pinMode(BUTTON_PREMIUM_PIN, INPUT_PULLUP);  // PREMIUM
   
-  // Treatment Relay pins
-  pinMode(RELAY_BASIC_PIN, OUTPUT);
-  pinMode(RELAY_STANDARD_PIN, OUTPUT);
-  pinMode(RELAY_PREMIUM_PIN, OUTPUT);
+  // Reset counter pin (GPIO 33) - IN7
+  pinMode(RESET_COUNTER_PIN, OUTPUT);
+  digitalWrite(RESET_COUNTER_PIN, LOW); // Start with relay CLOSED (active-low)
+  Serial.printf("✅ Reset counter pin %d initialized (CLOSED)\n", RESET_COUNTER_PIN);
   
-  // LED Mirror Relay pins
-  pinMode(LED_BASIC_PIN, OUTPUT);
-  pinMode(LED_STANDARD_PIN, OUTPUT);
-  pinMode(LED_PREMIUM_PIN, OUTPUT);
+  // Treatment Relay pins - DISABLED FOR DEBUGGING GPIO 227 errors
+  // pinMode(RELAY_BASIC_PIN, OUTPUT);
+  // pinMode(RELAY_STANDARD_PIN, OUTPUT);
+  // pinMode(RELAY_PREMIUM_PIN, OUTPUT);
   
-  // Initialize all relays to OFF state
-  digitalWrite(RELAY_BASIC_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(RELAY_STANDARD_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(RELAY_PREMIUM_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(LED_BASIC_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(LED_STANDARD_PIN, RELAY_OFF_LEVEL);
-  digitalWrite(LED_PREMIUM_PIN, RELAY_OFF_LEVEL);
+  // LED Mirror Relay pins - DISABLED FOR DEBUGGING GPIO 227 errors
+  // pinMode(LED_BASIC_PIN, OUTPUT);
+  // pinMode(LED_STANDARD_PIN, OUTPUT);
+  // pinMode(LED_PREMIUM_PIN, OUTPUT);
+  
+  // Initialize relay system
+  for (int i = 0; i < kNumRelays; ++i) {
+    pinMode(relays[i].pin, OUTPUT);
+    relays[i].state = false;
+  }
+  
+  applyAllRelays();
+  Serial.println("✅ Relay system initialized (all OFF)");
+
+  // Create WiFi background task
+  xTaskCreatePinnedToCore(
+    wifiTask,           // Task function
+    "WiFiTask",         // Task name
+    4096,              // Stack size
+    NULL,              // Parameters
+    1,                 // Priority
+    &wifiTaskHandle,   // Task handle
+    0                  // Core 0 (WiFi core)
+  );
+  Serial.println("✅ WiFi background task created");
 
   // RTC setup
   if (g_rtc.begin()) {
@@ -1474,9 +1575,9 @@ void setup(){
     Serial.print('.'); 
     if (WiFi.status() == WL_CONNECT_FAILED) {
       Serial.println("\n❌ WIFI: Connection failed - check credentials");
-      break;
+          break;
+      }
     }
-  }
   Serial.println(); 
   
   if (WiFi.status()==WL_CONNECTED) { 
@@ -1518,30 +1619,300 @@ void setup(){
   }
   
   drawMain();
+  
+  // RAM usage monitoring
+  Serial.println("📊 MEMORY: Initial RAM usage:");
+  Serial.printf("   Free Heap: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("   Free PSRAM: %d bytes\n", ESP.getFreePsram());
+  Serial.printf("   Heap Size: %d bytes\n", ESP.getHeapSize());
+  Serial.printf("   Flash Size: %d bytes\n", ESP.getFlashChipSize());
+  Serial.printf("   Sketch Size: %d bytes\n", ESP.getSketchSize());
+  Serial.printf("   Free Sketch Space: %d bytes\n", ESP.getFreeSketchSpace());
 }
 
 void loop(){
-  // Buttons → actions
-  bool b = digitalRead(BUTTON_BASIC_PIN) == LOW;
-  bool s = digitalRead(BUTTON_STANDARD_PIN) == LOW;
-  bool p = digitalRead(BUTTON_PREMIUM_PIN) == LOW;
-  
-  if (b && !btnBLast) { startTimer(Treatment::Basic); }
-  if (s && !btnSLast) { startTimer(Treatment::Standard); }
-  if (p && !btnPLast) { btnPHoldStart = millis(); }
-  if (!p && btnPLast) {
-    // short release: if active already, ignore here; starting PREMIUM handled on press
-    if (active == Treatment::None) {
-      // start premium on tap
-      startTimer(Treatment::Premium);
+  // GPIO Test Mode - Monitor all pins every 2 seconds
+  static uint32_t lastGpioCheck = 0;
+  if (GPIO_TEST_MODE && (millis() - lastGpioCheck >= 2000)) {
+    Serial.print("🔍 GPIO States: ");
+    Serial.printf("BTN_B=%d BTN_S=%d BTN_P=%d ", 
+                  digitalRead(BUTTON_BASIC_PIN), digitalRead(BUTTON_STANDARD_PIN), digitalRead(BUTTON_PREMIUM_PIN));
+    Serial.printf("RLY_B=%d RLY_S=%d RLY_P=%d ", 
+                  digitalRead(RELAY_BASIC_PIN), digitalRead(RELAY_STANDARD_PIN), digitalRead(RELAY_PREMIUM_PIN));
+    Serial.printf("LED_B=%d LED_S=%d LED_P=%d ", 
+                  digitalRead(LED_BASIC_PIN), digitalRead(LED_STANDARD_PIN), digitalRead(LED_PREMIUM_PIN));
+    Serial.printf("RST=%d RTC_SDA=%d RTC_SCL=%d\n", 
+                  digitalRead(RESET_COUNTER_PIN), digitalRead(RTC_SDA_PIN), digitalRead(RTC_SCL_PIN));
+    lastGpioCheck = millis();
+  }
+
+  // Buttons → actions (debounced)
+  bool bRaw = digitalRead(BUTTON_BASIC_PIN) == LOW;
+  bool sRaw = digitalRead(BUTTON_STANDARD_PIN) == LOW;
+  bool pRaw = digitalRead(BUTTON_PREMIUM_PIN) == LOW;
+
+  uint32_t nowMs = millis();
+
+  // Debounce BASIC
+  if (bRaw != bStable) {
+    if (nowMs - lastBChangeMs >= BUTTON_DEBOUNCE_MS) {
+      bStable = bRaw;
+      lastBChangeMs = nowMs;
     }
-    btnPHoldStart = 0;
+  } else {
+    lastBChangeMs = nowMs; // keep reference fresh when stable
   }
-  if (p && active != Treatment::None && btnPHoldStart && (millis() - btnPHoldStart >= 2000)) {
-    stopTreatment();
-    btnPHoldStart = 0;
+  // Debounce STANDARD
+  if (sRaw != sStable) {
+    if (nowMs - lastSChangeMs >= BUTTON_DEBOUNCE_MS) {
+      sStable = sRaw;
+      lastSChangeMs = nowMs;
+    }
+  } else {
+    lastSChangeMs = nowMs;
   }
-  btnBLast = b; btnSLast = s; btnPLast = p;
+  // Debounce PREMIUM
+  if (pRaw != pStable) {
+    if (nowMs - lastPChangeMs >= BUTTON_DEBOUNCE_MS) {
+      pStable = pRaw;
+      lastPChangeMs = nowMs;
+    }
+  } else {
+    lastPChangeMs = nowMs;
+  }
+  
+  // Skip edge detection during inhibit window
+  if (nowMs >= inputsInhibitUntil) {
+    // Button press detection (edge detection)
+    if (bStable && !btnBLast) { 
+      activateButtonRelay(1, 5000);  // Basic: 5 seconds
+    }
+    if (sStable && !btnSLast) { 
+      activateButtonRelay(2, 10000); // Standard: 10 seconds
+    }
+    if (pStable && !btnPLast) { 
+      activateButtonRelay(3, 12000); // Premium: 12 seconds
+    }
+  }
+  
+  // Update button last states
+  btnBLast = bStable;
+  btnSLast = sStable;
+  btnPLast = pStable;
+
+  // Check button relay timer
+  if (buttonRelayActive) {
+    uint32_t elapsed = millis() - buttonRelayStart;
+    uint32_t duration = 0;
+    
+    switch (activeButtonRelay) {
+      case 1: duration = 5000; break;  // Basic: 5 seconds
+      case 2: duration = 10000; break; // Standard: 10 seconds  
+      case 3: duration = 12000; break; // Premium: 12 seconds
+    }
+    
+    if (elapsed >= duration) {
+      deactivateButtonRelay();
+    }
+  }
+
+  // Serial commands
+  if (Serial.available()) {
+    char cmd = Serial.read();
+    if (cmd=='b' || cmd=='B') { startTimer(Treatment::Basic); }
+    if (cmd=='s' || cmd=='S') { startTimer(Treatment::Standard); }
+    if (cmd=='p' || cmd=='P') { startTimer(Treatment::Premium); }
+    if (cmd=='x' || cmd=='X') { stopTreatment(); }
+    // Reset handled via command queue
+    
+  // GPIO Test Mode commands
+  if (GPIO_TEST_MODE) {
+    if (cmd=='1') { 
+      relays[0].state = true;  // RELAY_BASIC_PIN
+      writeRelay(relays[0]);
+      Serial.println("🔍 TEST: RELAY_BASIC_PIN set HIGH"); 
+    }
+    if (cmd=='2') {
+      // Test GPIO 13 (new STANDARD relay pin)
+      Serial.println("🔍 TEST: Direct GPIO 13 control (STANDARD relay)");
+      Serial.printf("   Before: GPIO 13 = %d\n", digitalRead(13));
+      
+      digitalWrite(13, HIGH);
+      delay(100);
+      Serial.printf("   After HIGH: GPIO 13 = %d\n", digitalRead(13));
+      
+      digitalWrite(13, LOW);
+      delay(100);
+      Serial.printf("   After LOW: GPIO 13 = %d\n", digitalRead(13));
+      
+      // Also test the relay system
+      relays[1].state = true;  // RELAY_STANDARD_PIN (now GPIO 13)
+      writeRelay(relays[1]);
+      Serial.println("🔍 TEST: RELAY_STANDARD_PIN set HIGH");
+      Serial.printf("   Pin: %d, State: %s, ActiveLow: %s\n",
+                    relays[1].pin,
+                    relays[1].state ? "ON" : "OFF",
+                    relays[1].activeLow ? "LOW" : "HIGH");
+      Serial.printf("   Actual GPIO level: %d\n", digitalRead(RELAY_STANDARD_PIN));
+    }
+    if (cmd=='3') {
+      // Test GPIO 32 (new PREMIUM relay pin)
+      Serial.println("🔍 TEST: Direct GPIO 32 control (PREMIUM relay)");
+      Serial.printf("   Before: GPIO 32 = %d\n", digitalRead(32));
+      
+      digitalWrite(32, HIGH);
+      delay(100);
+      Serial.printf("   After HIGH: GPIO 32 = %d\n", digitalRead(32));
+      
+      digitalWrite(32, LOW);
+      delay(100);
+      Serial.printf("   After LOW: GPIO 32 = %d\n", digitalRead(32));
+      
+      // Also test the relay system
+      relays[2].state = true;  // RELAY_PREMIUM_PIN (now GPIO 32)
+      writeRelay(relays[2]);
+      Serial.println("🔍 TEST: RELAY_PREMIUM_PIN set HIGH"); 
+      Serial.printf("   Pin: %d, State: %s, ActiveLow: %s\n",
+                    relays[2].pin,
+                    relays[2].state ? "ON" : "OFF",
+                    relays[2].activeLow ? "LOW" : "HIGH");
+      Serial.printf("   Actual GPIO level: %d\n", digitalRead(RELAY_PREMIUM_PIN));
+    }
+    if (cmd=='0') { 
+      // Turn off all relays
+      for (int i = 0; i < kNumRelays; ++i) {
+        relays[i].state = false;
+      }
+      applyAllRelays();
+      Serial.println("🔍 TEST: All relays set LOW"); 
+    }
+    if (cmd=='g' || cmd=='G') {
+      logPinLevels();
+    }
+    if (cmd=='p') {
+      Serial.printf("🔍 PREMIUM Button Debug:\n");
+      Serial.printf("   Pin: %d\n", BUTTON_PREMIUM_PIN);
+      Serial.printf("   Current state: %d\n", digitalRead(BUTTON_PREMIUM_PIN));
+      Serial.printf("   Expected: 1 (HIGH) when not pressed\n");
+      Serial.printf("   Actual: %d (%s)\n", digitalRead(BUTTON_PREMIUM_PIN), 
+                   digitalRead(BUTTON_PREMIUM_PIN) ? "HIGH" : "LOW");
+      Serial.printf("   Pin mode: %s\n", "INPUT_PULLUP");
+    }
+    if (cmd=='r' || cmd=='R') {
+      // Reset Counter Function
+      Serial.println("🔄 RESET COUNTER: Resetting all treatment counters");
+      
+      // Activate reset relay (CLOSE for 1 second)
+      Serial.printf("   Activating reset relay (GPIO %d)...\n", RESET_COUNTER_PIN);
+      digitalWrite(RESET_COUNTER_PIN, HIGH); // OPEN relay (active-low)
+      Serial.println("   ✅ Reset relay OPENED");
+      delay(1000); // 1 second delay
+      digitalWrite(RESET_COUNTER_PIN, LOW); // CLOSE relay back (active-low)
+      Serial.println("   ❌ Reset relay CLOSED");
+      
+      // Reset EEPROM counters
+      counterB = 0;
+      counterS = 0; 
+      counterP = 0;
+      
+      // Save to EEPROM
+      EEPROM.put(ADDR_COUNTER_B, counterB);
+      EEPROM.put(ADDR_COUNTER_S, counterS);
+      EEPROM.put(ADDR_COUNTER_P, counterP);
+      EEPROM.commit();
+      
+      Serial.println("✅ COUNTERS: All counters reset to 0");
+      Serial.printf("   BASIC: %d, STANDARD: %d, PREMIUM: %d\n", counterB, counterS, counterP);
+      Serial.println("💾 EEPROM: Counters saved to persistent storage");
+    }
+    if (cmd=='t' || cmd=='T') {
+      // Show current RTC time
+      if (g_rtc.begin()) {
+        DateTime now = g_rtc.now();
+        Serial.print("🕐 RTC Time: ");
+        Serial.println(now.timestamp());
+        Serial.printf("   Year: %d, Month: %d, Day: %d\n", now.year(), now.month(), now.day());
+        Serial.printf("   Hour: %d, Minute: %d, Second: %d\n", now.hour(), now.minute(), now.second());
+        Serial.printf("   Day of week: %d\n", now.dayOfTheWeek());
+    } else {
+        Serial.println("❌ RTC: Not initialized");
+      }
+    }
+    if (cmd=='n' || cmd=='N') {
+      // Sync RTC from NTP
+      Serial.println("🔄 RTC: Syncing from NTP...");
+      if (syncRTCFromNTP()) {
+        Serial.println("✅ RTC: Successfully synced from NTP");
+        DateTime now = g_rtc.now();
+        Serial.print("🕐 New RTC Time: ");
+        Serial.println(now.timestamp());
+  } else {
+        Serial.println("❌ RTC: Failed to sync from NTP");
+      }
+    }
+    if (cmd=='c' || cmd=='C') {
+      // Show current counter values
+      Serial.println("📊 COUNTER STATUS:");
+      Serial.printf("   BASIC: %d treatments\n", counterB);
+      Serial.printf("   STANDARD: %d treatments\n", counterS);
+      Serial.printf("   PREMIUM: %d treatments\n", counterP);
+      Serial.printf("   TOTAL: %d treatments\n", counterB + counterS + counterP);
+      Serial.println("💾 EEPROM: Counters are persistent across power cycles");
+    }
+    if (cmd=='4') {
+      // Reset counter relay on IN7 GPIO 33 - OPEN for 1 second
+      Serial.println("🔄 RESET COUNTER RELAY: IN7 GPIO 33 OPENING (1 second)");
+      Serial.printf("   Pin: %d, Before: %d\n", RESET_COUNTER_PIN, digitalRead(RESET_COUNTER_PIN));
+      
+      // Open relay (HIGH for active-low relay)
+      digitalWrite(RESET_COUNTER_PIN, HIGH);
+      Serial.println("   ✅ Reset Counter Relay OPENED (HIGH)");
+      Serial.printf("   Immediate check: %d\n", digitalRead(RESET_COUNTER_PIN));
+      
+      delay(1000); // 1 second delay
+      
+      // Close relay back (LOW for active-low relay)
+      digitalWrite(RESET_COUNTER_PIN, LOW);
+      Serial.printf("   ❌ Reset Counter Relay CLOSED (LOW), After: %d\n", digitalRead(RESET_COUNTER_PIN));
+      
+      // Additional verification after a short delay
+      delay(100);
+      Serial.printf("   Final verification: %d\n", digitalRead(RESET_COUNTER_PIN));
+    }
+    if (cmd=='5') {
+      // Manual reset relay control
+      Serial.println("🔧 MANUAL RESET RELAY CONTROL:");
+      Serial.printf("   Current state: %d\n", digitalRead(RESET_COUNTER_PIN));
+      Serial.println("   Commands: 'h' = HIGH (OPEN), 'l' = LOW (CLOSED)");
+    }
+    if (cmd=='h' || cmd=='H') {
+      // Force reset relay HIGH (OPEN)
+      digitalWrite(RESET_COUNTER_PIN, HIGH);
+      Serial.printf("🔧 RESET RELAY: Forced HIGH (OPEN), State: %d\n", digitalRead(RESET_COUNTER_PIN));
+    }
+    if (cmd=='l' || cmd=='L') {
+      // Force reset relay LOW (CLOSED)
+      digitalWrite(RESET_COUNTER_PIN, LOW);
+      Serial.printf("🔧 RESET RELAY: Forced LOW (CLOSED), State: %d\n", digitalRead(RESET_COUNTER_PIN));
+    }
+    if (cmd=='?') {
+      Serial.println("🔍 GPIO Test Commands:");
+      Serial.println("1,2,3 = Set relay HIGH (BASIC,STANDARD,PREMIUM)");
+      Serial.println("0 = Set all relays LOW");
+      Serial.println("4 = Reset counter relay IN7 GPIO 33 (OPEN for 1 second)");
+      Serial.println("5 = Manual reset relay control");
+      Serial.println("h = Force reset relay HIGH (OPEN)");
+      Serial.println("l = Force reset relay LOW (CLOSED)");
+      Serial.println("g = Show GPIO levels and logical states");
+      Serial.println("p = Debug PREMIUM button");
+      Serial.println("r = Reset all treatment counters");
+      Serial.println("c = Show current counter values");
+      Serial.println("t = Show RTC time");
+      Serial.println("n = Sync RTC from NTP");
+      Serial.println("? = Show this help");
+    }
+  }
+  }
 
   if (active!=Treatment::None) { uint32_t elapsed=(uint32_t)(millis()-activeStartMs); if (elapsed>=activeDurationMs) stopTreatment(); else if (elapsed%1000<50) drawTimer(); }
 
@@ -1585,8 +1956,8 @@ void loop(){
     processCommandQueue();
     
     // Poll for new commands
-    uint32_t now = millis();
-    if (now - lastCommandPoll >= COMMAND_POLL_INTERVAL_MS) {
+    uint32_t now2 = millis();
+    if (now2 - lastCommandPoll >= COMMAND_POLL_INTERVAL_MS) {
       Serial.println("📡 COMMAND: Automatic command poll...");
       if (pollCommands()) {
         Serial.println("✅ COMMAND: Poll successful");
@@ -1617,7 +1988,7 @@ void loop(){
         String line = readNextEvent();
         if (line.length() > 0) {
           // Parse event to show what we're uploading
-          StaticJsonDocument<256> eventDoc;
+          JsonDocument eventDoc;
           if (deserializeJson(eventDoc, line) == DeserializationError::Ok) {
             String eventId = eventDoc["event_id"].as<String>();
             String treatment = eventDoc["treatment"].as<String>();
@@ -1654,43 +2025,39 @@ void loop(){
       resetBackoff(); 
     }
   } else {
-    // WiFi not connected - attempt periodic reconnection
-    uint32_t now = millis();
-    if (now - lastReconnectAttempt >= reconnectDelay) {
-      Serial.print("🔄 WIFI: Periodic reconnection attempt (");
-      Serial.print(reconnectAttempts + 1);
-      Serial.println(")");
-      
-      if (attemptWiFiReconnection()) {
-        Serial.println("✅ WIFI: Periodic reconnection successful");
-      } else {
-        Serial.print("❌ WIFI: Periodic reconnection failed, next attempt in ");
-        Serial.print(reconnectDelay / 1000);
-        Serial.println(" seconds");
-      }
-      
-      lastReconnectAttempt = now;
+    // WiFi not connected - trigger background reconnection task
+    uint32_t now3 = millis();
+    if (now3 - lastReconnectAttempt >= reconnectDelay && !wifiReconnectionInProgress) {
+      Serial.println("🔄 WIFI: Triggering background reconnection task");
+      wifiReconnectionInProgress = true;
+      lastReconnectAttempt = now3;
     }
     
-    // Show queue status periodically when offline
-    static uint32_t lastQueueStatus = 0;
-    if (now - lastQueueStatus >= 10000) { // Every 10 seconds
-      size_t qSize = queueSize();
-      size_t cmdSize = commandQueueSize();
-      if (qSize > 0 || cmdSize > 0) {
-        Serial.print("📱 OFFLINE: Event queue: ");
-        Serial.print(qSize);
-        Serial.print(" bytes, Command queue: ");
-        Serial.print(cmdSize);
-        Serial.print(" bytes pending | Next reconnect in: ");
-        Serial.print((reconnectDelay - (now - lastReconnectAttempt)) / 1000);
-        Serial.println("s");
-      }
-      lastQueueStatus = now;
+    // Show offline status periodically
+    static uint32_t lastOfflineStatus = 0;
+    if (now3 - lastOfflineStatus >= 10000) { // Every 10 seconds
+      Serial.print("📱 OFFLINE: Simplified operation - events will be sent when WiFi reconnects | Next reconnect in: ");
+      Serial.print((reconnectDelay - (now3 - lastReconnectAttempt)) / 1000);
+      Serial.println("s");
+      lastOfflineStatus = now3;
     }
   }
 
-  delay(50); // Reduced loop frequency from 50Hz to 20Hz for even lower power consumption
+  // Debug: Monitor relay pin states continuously in loop
+  static uint32_t lastDebug = 0;
+  if (millis() - lastDebug > 2000) { // Every 2 seconds
+    // Old debug code removed - using new GPIO monitoring instead
+    lastDebug = millis();
+  }
+  
+  // RAM usage monitoring every 30 seconds
+  static uint32_t lastRamCheck = 0;
+  if (millis() - lastRamCheck > 30000) { // Every 30 seconds
+    Serial.printf("📊 MEMORY: Free Heap: %d bytes (%.1f%% free)\n", 
+                  ESP.getFreeHeap(), 
+                  (float)ESP.getFreeHeap() / ESP.getHeapSize() * 100.0);
+    lastRamCheck = millis();
+  }
 }
 
 

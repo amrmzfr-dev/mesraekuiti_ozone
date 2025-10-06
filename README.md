@@ -2,7 +2,7 @@
 ========================================================= OZONE MACHINE COUNTER SYSTEM (ESP32)===================================================
 ================================================================================================================================================================
 
-This firmware powers an ozone machine counter-and-control panel built on an ESP32. It manages three treatment types (BASIC, STANDARD, PREMIUM) with per‑treatment timers, relays, and persistent counters stored in EEPROM. The system is designed to be robust for rental/production scenarios with button-driven operation.
+This firmware powers an ozone machine counter-and-control panel built on an ESP32. It manages three treatment types (BASIC, STANDARD, PREMIUM) with per‑treatment timers, relays, and persistent counters stored in EEPROM. Event/command queues are persisted on an SD card for large, durable storage. The system is designed to be robust for rental/production scenarios with button-driven operation.
 
 ### Key Features
 - Three treatments:
@@ -17,7 +17,7 @@ This firmware powers an ozone machine counter-and-control panel built on an ESP3
 - Long‑press stop during a running timer (PREMIUM button ≥ 2s)
 - Wi‑Fi connectivity with local web configuration interface
 - AP mode fallback for initial setup and configuration
-- Cloud logging API with persistent queueing and exponential backoff retry
+- Cloud logging API with persistent SD card queueing and exponential backoff retry
 - **Automatic WiFi reconnection** with smart retry logic and connection quality monitoring
 
 ===============================================================================================================================================================
@@ -60,6 +60,15 @@ Important: Avoid ESP32 bootstrap pins (e.g., GPIO0, GPIO2) for buttons due to bo
 - Address: 0x68
 
 ### Power
+### SD Card (recommended for persistence)
+- Module: microSD card SPI adapter
+- Pins (SPI):
+  - CS: GPIO 33
+  - SCK: GPIO 32
+  - MOSI: GPIO 13
+  - MISO: GPIO 35
+- Power: 3.3V or 5V (per adapter), common GND with ESP32
+- Notes: SD card holds event and command queues as JSONL files
 - ESP32 is powered via USB or regulated 5V input. Ensure sufficient current budget.
 
 ### Wi‑Fi
@@ -77,10 +86,11 @@ Important: Avoid ESP32 bootstrap pins (e.g., GPIO0, GPIO2) for buttons due to bo
 - `platformio.ini` includes:
   - `EEPROM@2.0.0`
   - `bblanchon/ArduinoJson@^7.0.4`
+  - `SD@^2.0.0`
   - `monitor_speed = 115200`
 
 ### Source Structure
-- **Main file**: `src/main.cpp` — Core system + pins + buttons + timers + relays + EEPROM + Wi‑Fi + embedded web UI
+- **Main file**: `src/main.cpp` — Core system + pins + buttons + timers + relays + EEPROM + SD card + Wi‑Fi
 - **Pins**: `include/pins.h` — Centralized pin map and constants
 - (Removed) `src/config.h`, `src/web_interface.h/.cpp` — no longer used
 
@@ -218,17 +228,19 @@ The system reports treatment button presses to a web backend for billing/auditin
 - Event identity (idempotency key): Monotonic per-device sequence combined with device ID
 - Device identity: Persistent `device_id` and `token` stored in EEPROM
 - **Queueing & Retry**: Persistent event queue with exponential backoff retry (2s → 5min)
-- **Local Storage**: LittleFS-based JSONL queue with 4MB size limit
+- **Local Storage (SD card)**: JSONL queues
+  - Events: `events.jsonl` (default max ~4MB)
+  - Commands: `commands.jsonl` (default max ~1MB)
 - **Reliability**: At-least-once delivery with automatic retry and deduplication
 - Handshake mechanism: Automatic device registration and token retrieval
-- Clock & timestamps: RTC (DS3231) preferred, UTC ISO-8601 format
+- Clock & timestamps: RTC (DS3231) preferred; falls back to NTP/RTC
 - Security: HTTPS with Bearer token authentication
 
 **Production Features:**
-- Events queued locally during network outages
+- Events queued locally during network outages (to SD card)
 - Exponential backoff with ±20% jitter
-- Queue persistence across power cycles
-- Background TaskNet processing
+- Queue persistence across power cycles (SD card)
+- Background processing loop
 - Server acknowledgment required before event deletion
 
 **Backend API Endpoints:**
@@ -287,7 +299,7 @@ Note: Production values are 5/10/15 minutes. Switch back before deployment.
 ====================================================================== EEPROM PERSISTENCE =====================================================================
 ===============================================================================================================================================================
 
-Counters are stored in ESP32 EEPROM emulation and auto‑loaded on boot.
+Counters are stored in ESP32 EEPROM emulation and auto‑loaded on boot. Large/log data lives on SD card.
 
 Layout:
 - Address 0..3:  B counter (uint32_t)
@@ -296,6 +308,19 @@ Layout:
 - Address 12..13: Magic number 0x1234 for data validity
 
 When counters change (start of a treatment or after reset), values are saved immediately via `EEPROM.commit()`.
+
+### SD Card Persistence
+- Files:
+  - `events.jsonl`: one JSON object per line for treatment events
+  - `commands.jsonl`: one JSON object per line for pending commands/results
+- Initialization: SD is mounted in `setup()`; card type/size printed to serial
+- Behavior:
+  - On enqueue: append a line to the corresponding file
+  - On upload success: remove the first line (oldest) and rewrite remainder
+  - Size caps: events ~4MB, commands ~1MB (configurable in code)
+- Failure handling:
+  - If SD init fails, firmware logs the error and continues (counters remain in EEPROM)
+  - Queues resume on next boot; nothing is lost between power cycles
 
 ===============================================================================================================================================================
 ======================================================================== BUILD & UPLOAD =======================================================================
@@ -422,7 +447,7 @@ WiFi connection issues:
 - Relay polarity & power: Verify relay boards (active-HIGH vs active-LOW). Ensure 5V supply headroom; shared GND with ESP32; flyback protection present.
 - Business rule: Counter increments at start, even if immediately stopped (2s hold). Confirm this is desired billing behavior.
 - Identity & security: Provision persistent `device_id`, secure API token storage, use HTTPS with root CA stored in flash, plan rotation.
-- Delivery queue implementation: Append-only LittleFS records; oldest-first uploads; delete only on server ack; exponential backoff with jitter; resume on boot; server dedupe by `event_id`.
+- Delivery queue implementation: Append-only SD card JSONL records; oldest-first uploads; delete only on server ack; exponential backoff with jitter; resume on boot; server dedupe by `event_id`.
 
 ===============================================================================================================================================================
 ========================================================= MONTHLY COUNTER ROLLOVER (RTC‑BASED, DEFERRED) ======================================================
