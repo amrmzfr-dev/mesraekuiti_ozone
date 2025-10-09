@@ -339,18 +339,18 @@ def device_assign(request, device_id):
                 pass
             
             # Remove any existing device from the target machine
-            if machine.device:
-                machine.device.machine = None
-                machine.device.assigned = False
-                machine.device.save()
+            if machine.device is not None:
+                existing_device = machine.device
+                existing_device.assigned = False
+                existing_device.save()
             
-            # Create the assignment
-            device.machine = machine
-            device.assigned = True
-            device.save()
-            
+            # Create the assignment (set the OneToOneField on the machine)
             machine.device = device
             machine.save()
+            
+            # Update device assignment status
+            device.assigned = True
+            device.save()
             
         except Machine.DoesNotExist:
             pass
@@ -364,14 +364,22 @@ def device_unassign(request, device_id):
     """Unassign a device from its machine"""
     try:
         device = Device.objects.get(device_id=device_id)
-        # Remove device from machine
-        if device.machine:
-            device.machine.device = None
-            device.machine.save()
         
-        device.machine = None
+        # Safely check if device has a machine assigned
+        try:
+            if device.machine is not None:
+                # Remove device from machine (this is the correct way)
+                machine = device.machine
+                machine.device = None
+                machine.save()
+        except:
+            # Device has no machine assigned - this is fine, just clear the assignment flag
+            pass
+        
+        # Update device assignment status (always clear the assigned flag)
         device.assigned = False
         device.save()
+        
     except Device.DoesNotExist:
         pass
     
